@@ -11,6 +11,7 @@ add_subdirectory(external/spdlog)
 # 再测试 spdlog 库
 add_subdirectory(tests/spdlog_test)
 
+# 此处添加 SQLite 库是采用源码的方式直接进行编译的，就是官网提供的sqlite-amalgamation-3500400
 
 # 添加 SQLite 测试
 add_subdirectory(tests/sqlite_test)
