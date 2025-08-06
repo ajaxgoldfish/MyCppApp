@@ -1,11 +1,8 @@
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 # 声明一个可执行文件
 add_executable(sqlite_test
         sqlite_test.cpp
-        ../../external/sqlite/sqlite-amalgamation-3500400/sqlite3.c
 )
 
-# 设置头文件路径
-target_include_directories(sqlite_test PRIVATE
-        ${PROJECT_SOURCE_DIR}/external/sqlite/sqlite-amalgamation-3500400
-)
+target_link_libraries(sqlite_test PRIVATE unofficial::sqlite3::sqlite3)

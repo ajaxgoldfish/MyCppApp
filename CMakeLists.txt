@@ -6,24 +6,19 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 先添加 spdlog 库
-add_subdirectory(external/spdlog)
-# 再测试 spdlog 库
+# spdlog
 add_subdirectory(tests/spdlog_test)
-
-# 此处添加 SQLite 库是采用源码的方式直接进行编译的，就是官网提供的sqlite-amalgamation-3500400
-
-# 添加 SQLite 测试
+# sqlite3
 add_subdirectory(tests/sqlite_test)
-
-# 添加 nlohmann_json 测试
+# nlohmann_json
 add_subdirectory(tests/nlohmann_test)
+# opencv
+add_subdirectory(tests/opencv_test)
+# cpp-httplib
+add_subdirectory(tests/httplib_test/server)
+add_subdirectory(tests/httplib_test/client)
 
-# 添加你的可执行文件
-add_executable(MyCppApp main.cpp
-        tests/nlohmann_test/json_test.cpp)
 
-# 链接 spdlog 库
-target_link_libraries(MyCppApp PRIVATE spdlog::spdlog)
-
+# MyCppApp
+add_executable(MyCppApp src/main.cpp)
 
