@@ -258,7 +258,7 @@ int main() {
 
         // —— 控制台输出（保持原样）
         std::cout << std::fixed << std::setprecision(6);
-        std::cout << "[#" << i << "] P_world = (" << p_w_m.x << ", " << p_w_m.y << ", " << p_w_m.z << ") m\n";
+        std::cout << "[#" << i << "] P_world = (" << p_w_m.x << ", " << p_w_m.y << ", " << p_w_m.z << ") m";
         std::cout << "           WPR = (" << W << ", " << P << ", " << R << ") deg\n";
 
         // =========================
@@ -271,80 +271,80 @@ int main() {
         // 画底边中点（像素）
         cv::circle(vis, midPx, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
 
-// 在中点旁边标注 xyz（m）与 WPR（deg）
-std::ostringstream oss1, oss2;
-oss1 << std::fixed << std::setprecision(3)
-     << "xyz(m)=(" << p_w_m.x << ", " << p_w_m.y << ", " << p_w_m.z << ")";
-oss2 << std::fixed << std::setprecision(1)
-     << "WPR(deg)=(" << W << ", " << P << ", " << R << ")";
+        // 在中点旁边标注 xyz（m）与 WPR（deg）
+        std::ostringstream oss1, oss2;
+        oss1 << std::fixed << std::setprecision(3)
+             << "xyz(m)=(" << p_w_m.x << ", " << p_w_m.y << ", " << p_w_m.z << ")";
+        oss2 << std::fixed << std::setprecision(1)
+             << "WPR(deg)=(" << W << ", " << P << ", " << R << ")";
 
-// 字体参数
-const double fontScale = 0.45;
-const int    thickness = 1;
-const cv::Scalar txtColor(0, 0, 0);
+        // 字体参数
+        const double fontScale = 0.45;
+        const int    thickness = 1;
+        const cv::Scalar txtColor(0, 0, 0);
 
-// 计算两行文字尺寸
-int base1 = 0, base2 = 0;
-cv::Size sz1 = cv::getTextSize(oss1.str(), cv::FONT_HERSHEY_SIMPLEX, fontScale, thickness, &base1);
-cv::Size sz2 = cv::getTextSize(oss2.str(), cv::FONT_HERSHEY_SIMPLEX, fontScale, thickness, &base2);
-const int lineGap = 4;                         // 两行之间的间隔像素
-int boxW = (sz1.width > sz2.width) ? sz1.width : sz2.width;
-const int boxH = sz1.height + lineGap + sz2.height;
+        // 计算两行文字尺寸
+        int base1 = 0, base2 = 0;
+        cv::Size sz1 = cv::getTextSize(oss1.str(), cv::FONT_HERSHEY_SIMPLEX, fontScale, thickness, &base1);
+        cv::Size sz2 = cv::getTextSize(oss2.str(), cv::FONT_HERSHEY_SIMPLEX, fontScale, thickness, &base2);
+        const int lineGap = 4;                         // 两行之间的间隔像素
+        int boxW = (sz1.width > sz2.width) ? sz1.width : sz2.width;
+        const int boxH = sz1.height + lineGap + sz2.height;
 
-// OBB 的外接轴对齐矩形（用于简单碰撞检测）
-cv::Rect obbBox = rrect.boundingRect() & cv::Rect(0,0,vis.cols,vis.rows);
+        // OBB 的外接轴对齐矩形（用于简单碰撞检测）
+        cv::Rect obbBox = rrect.boundingRect() & cv::Rect(0,0,vis.cols,vis.rows);
 
-// 生成候选放置位置（文字包围框左上角）
-std::array<cv::Point,4> candidates = {
-    cv::Point((int)std::round(midPx.x + 8),                (int)std::round(midPx.y - 8 - boxH)), // 右上
-    cv::Point((int)std::round(midPx.x + 8),                (int)std::round(midPx.y + 8)),        // 右下
-    cv::Point((int)std::round(midPx.x - 8 - boxW),         (int)std::round(midPx.y - 8 - boxH)), // 左上
-    cv::Point((int)std::round(midPx.x - 8 - boxW),         (int)std::round(midPx.y + 8))         // 左下
-};
+        // 生成候选放置位置（文字包围框左上角）
+        std::array<cv::Point,4> candidates = {
+            cv::Point((int)std::round(midPx.x + 8),                (int)std::round(midPx.y - 8 - boxH)), // 右上
+            cv::Point((int)std::round(midPx.x + 8),                (int)std::round(midPx.y + 8)),        // 右下
+            cv::Point((int)std::round(midPx.x - 8 - boxW),         (int)std::round(midPx.y - 8 - boxH)), // 左上
+            cv::Point((int)std::round(midPx.x - 8 - boxW),         (int)std::round(midPx.y + 8))         // 左下
+        };
 
-// 选择一个不与已占用区域/OBB 外接矩形相交的候选，并裁剪到图内
-cv::Point chosenTL = candidates[0];
-bool placed = false;
-for (const auto& tl : candidates) {
-    cv::Rect box(tl.x, tl.y, boxW, boxH);
-    // 裁剪到图像范围内（避免越界）
-    if (box.x < 0) box.x = 0;
-    if (box.y < 0) box.y = 0;
-    if (box.x + box.width  > vis.cols) box.x = vis.cols - box.width;
-    if (box.y + box.height > vis.rows) box.y = vis.rows - box.height;
+        // 选择一个不与已占用区域/OBB 外接矩形相交的候选，并裁剪到图内
+        cv::Point chosenTL = candidates[0];
+        bool placed = false;
+        for (const auto& tl : candidates) {
+            cv::Rect box(tl.x, tl.y, boxW, boxH);
+            // 裁剪到图像范围内（避免越界）
+            if (box.x < 0) box.x = 0;
+            if (box.y < 0) box.y = 0;
+            if (box.x + box.width  > vis.cols) box.x = vis.cols - box.width;
+            if (box.y + box.height > vis.rows) box.y = vis.rows - box.height;
 
-    bool overlap = false;
-    // 与已放置文字框碰撞检测
-    for (const auto& used : usedLabelBoxes) {
-        if ( (box & used).area() > 0 ) { overlap = true; break; }
-    }
-    // 与当前 OBB 外接矩形碰撞检测
-    if (!overlap && (box & obbBox).area() > 0) overlap = true;
+            bool overlap = false;
+            // 与已放置文字框碰撞检测
+            for (const auto& used : usedLabelBoxes) {
+                if ( (box & used).area() > 0 ) { overlap = true; break; }
+            }
+            // 与当前 OBB 外接矩形碰撞检测
+            if (!overlap && (box & obbBox).area() > 0) overlap = true;
 
-    if (!overlap) { chosenTL = box.tl(); placed = true; break; }
-}
-if (!placed) {
-    // 全部相交也没关系，就用右上角（已裁剪）强制放置
-    cv::Rect box(candidates[0].x, candidates[0].y, boxW, boxH);
-    if (box.x < 0) box.x = 0;
-    if (box.y < 0) box.y = 0;
-    if (box.x + box.width  > vis.cols) box.x = vis.cols - box.width;
-    if (box.y + box.height > vis.rows) box.y = vis.rows - box.height;
-    chosenTL = box.tl();
-}
+            if (!overlap) { chosenTL = box.tl(); placed = true; break; }
+        }
+        if (!placed) {
+            // 全部相交也没关系，就用右上角（已裁剪）强制放置
+            cv::Rect box(candidates[0].x, candidates[0].y, boxW, boxH);
+            if (box.x < 0) box.x = 0;
+            if (box.y < 0) box.y = 0;
+            if (box.x + box.width  > vis.cols) box.x = vis.cols - box.width;
+            if (box.y + box.height > vis.rows) box.y = vis.rows - box.height;
+            chosenTL = box.tl();
+        }
 
-// 依据包围框左上角，计算两行文字的基线位置
-cv::Point line1Org(chosenTL.x,               chosenTL.y + sz1.height);
-cv::Point line2Org(chosenTL.x,               chosenTL.y + sz1.height + lineGap + sz2.height);
+        // 依据包围框左上角，计算两行文字的基线位置
+        cv::Point line1Org(chosenTL.x,               chosenTL.y + sz1.height);
+        cv::Point line2Org(chosenTL.x,               chosenTL.y + sz1.height + lineGap + sz2.height);
 
-// 实际绘制（无底色）
-cv::putText(vis, oss1.str(), line1Org + cv::Point(2,0),
-            cv::FONT_HERSHEY_SIMPLEX, fontScale, txtColor, thickness, cv::LINE_AA);
-cv::putText(vis, oss2.str(), line2Org + cv::Point(2,0),
-            cv::FONT_HERSHEY_SIMPLEX, fontScale, txtColor, thickness, cv::LINE_AA);
+        // 实际绘制（无底色）
+        cv::putText(vis, oss1.str(), line1Org + cv::Point(2,0),
+                    cv::FONT_HERSHEY_SIMPLEX, fontScale, txtColor, thickness, cv::LINE_AA);
+        cv::putText(vis, oss2.str(), line2Org + cv::Point(2,0),
+                    cv::FONT_HERSHEY_SIMPLEX, fontScale, txtColor, thickness, cv::LINE_AA);
 
-// 把本次文字包围框加入占用列表（稍加边距，减少紧贴）
-usedLabelBoxes.emplace_back(chosenTL.x, chosenTL.y, boxW, boxH);
+        // 把本次文字包围框加入占用列表（稍加边距，减少紧贴）
+        usedLabelBoxes.emplace_back(chosenTL.x, chosenTL.y, boxW, boxH);
 
     }
 
