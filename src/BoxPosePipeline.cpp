@@ -70,18 +70,49 @@ bool BoxPosePipeline::run(const cv::Mat& rgb,
     std::vector<Proj> proj;
     projectPointCloud_(pc_cam, rgb.cols, rgb.rows, proj);
 
-    // 4) 逐个实例求解
+    // 4) 逐个实例求解（并行计算 + 单线程可视化与收集）
     results.clear();
     results.reserve(rect_and_mid.size());
-    for (size_t i = 0; i < rect_and_mid.size(); ++i) {
+
+    const int N = static_cast<int>(rect_and_mid.size());
+    // 暂存结果、是否成功、耗时
+    std::vector<BoxPoseResult> tmp(N);
+    std::vector<char> ok_flags(N, 0);
+    std::vector<double> elapsed_ms_each(N, 0.0);
+
+
+#pragma omp parallel for schedule(dynamic,1)
+    for (int i = 0; i < N; ++i) {
         BoxPoseResult res;
-        if (solveOneBox_(i, rect_and_mid[i], proj, pc_cam, &vis, res)) {
-            results.push_back(res);
-        }
+        // 可视化指针传 nullptr，避免并发写 vis
+        bool ok = solveOneBox_(static_cast<size_t>(i),
+                               rect_and_mid[i],
+                               proj,
+                               pc_cam,
+                               /*vis_io=*/nullptr,
+                               res);
+        if (ok) {
+            tmp[i] = std::move(res);  // 按下标写回，无需锁
+            ok_flags[i] = 1;
+        }}
+
+    // —— 单线程阶段：收集结果并统一画到 vis —— //
+    for (int i = 0; i < N; ++i) {
+        if (!ok_flags[i]) continue;
+
+        results.push_back(tmp[i]);
+
+        // 现在才在 vis 上绘制（单线程安全）
+        const auto& r = results.back();
+        drawRotRect(vis, r.obb, cv::Scalar(0, 0, 0), 2);
+        cv::circle(vis, r.bottomMidPx, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
+        drawEightLinesCentered_(vis, r.obb, r.id, r.xyz_m, r.wpr_deg,
+                                r.width_m, r.height_m, r.bottomMidPx);
     }
 
     if (vis_out) *vis_out = vis;
     return true;
+
 }
 
 // ===================== 步骤实现 =====================

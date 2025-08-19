@@ -35,6 +35,8 @@ cv::Mat MaskRCNNRunner::paint(
     float score_thr,
     float mask_thr)
 {
+    auto t0 = std::chrono::steady_clock::now();  // ⏱ 开始计时
+
     if (orig.empty()) {
         throw std::runtime_error("输入图像为空");
     }
@@ -110,6 +112,11 @@ cv::Mat MaskRCNNRunner::paint(
     }
 
     spdlog::info("绘制 {} 个实例", kept);
+
+    auto t1 = std::chrono::steady_clock::now();  // ⏱ 结束计时
+    double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    spdlog::info("paint{}",elapsed_ms);
     return vis;
 }
 
