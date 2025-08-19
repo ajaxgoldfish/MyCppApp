@@ -115,8 +115,6 @@ int main() {
         proj.push_back({u, v, i});
     }
 
-    std::vector<cv::Rect> usedLabelBoxes;  // 存放已放置文字的占用矩形
-
     // —— 逐实例求解与标注
     for (size_t i = 0; i < rect_and_mid.size(); ++i) {
         const cv::RotatedRect& rrect = rect_and_mid[i].first;
@@ -136,8 +134,8 @@ int main() {
         }
 
         // 1) OBB 底边两个像素点
-        cv::Point2f p0, p1;
-        if (!FusionGeometry::bottomEdgePoints(rrect, p0, p1)) {
+        cv::Point2f p0, p1,p3;
+        if (!FusionGeometry::bottomEdgeWithThirdPoint(rrect, p0, p1,p3)) {
             std::cout << "[#" << i << "] 无法获得底边两点\n";
             continue;
         }
@@ -154,12 +152,19 @@ int main() {
         };
         Eigen::Vector3d ray1_cam = pix2dir(p0);
         Eigen::Vector3d ray2_cam = pix2dir(p1);
+        Eigen::Vector3d ray3_cam = pix2dir(p3);
 
-        // 3) 拟合平面 + 两射线与平面求交（相机系：中点/法向/线方向）
+        // 3) 拟合平面 + 三射线与平面求交（相机系：中点/法向/线方向）
         cv::Point3f xyz_cam;
         cv::Vec3f   n_cam, line_cam;
-        if (!FusionGeometry::computeBottomLineMidInfo(
-                rect_points, ray1_cam, ray2_cam, xyz_cam, n_cam, line_cam)) {
+        cv::Point3f xyz1_cam, xyz2_cam, xyz3_cam;   // 新增：三个交点输出
+
+        if (!FusionGeometry::computeBottomLineMidInfo3(
+                rect_points,
+                ray1_cam, ray2_cam, ray3_cam,   // ← 多了 ray3_cam
+                xyz_cam, n_cam, line_cam,
+                xyz1_cam, xyz2_cam, xyz3_cam))  // ← 多了三个输出
+        {
             std::cout << "[#" << i << "] 平面/交点求解失败\n";
             continue;
         }
@@ -193,10 +198,45 @@ int main() {
         // —— 中点：p_world = T_wc * p_cam_re_mm（mm）→ m
         cv::Mat p_w_h = T_wc * cv::Mat(p_cam_re_mm);
         cv::Point3f p_w_m(
-            p_w_h.at<float>(0)/1000.0f,
-            p_w_h.at<float>(1)/1000.0f,
-            p_w_h.at<float>(2)/1000.0f
+            p_w_h.at<float>(0),
+            p_w_h.at<float>(1),
+            p_w_h.at<float>(2)
         );
+
+        // ========== 新增：三个交点的重排 + 转换 ==========
+        auto reorder_point = [](const cv::Point3f& p)->cv::Vec4f {
+            return cv::Vec4f(p.z * 1000.0f, -p.x * 1000.0f, -p.y * 1000.0f, 1.0f);
+        };
+
+        cv::Vec4f p1_cam_re_mm = reorder_point(xyz1_cam);
+        cv::Vec4f p2_cam_re_mm = reorder_point(xyz2_cam);
+        cv::Vec4f p3_cam_re_mm = reorder_point(xyz3_cam);
+
+        cv::Mat p1_w_h = T_wc * cv::Mat(p1_cam_re_mm);
+        cv::Mat p2_w_h = T_wc * cv::Mat(p2_cam_re_mm);
+        cv::Mat p3_w_h = T_wc * cv::Mat(p3_cam_re_mm);
+
+        cv::Point3f p1_w_m(
+            p1_w_h.at<float>(0)/1000.0f,
+            p1_w_h.at<float>(1)/1000.0f,
+            p1_w_h.at<float>(2)/1000.0f
+        );
+        cv::Point3f p2_w_m(
+            p2_w_h.at<float>(0)/1000.0f,
+            p2_w_h.at<float>(1)/1000.0f,
+            p2_w_h.at<float>(2)/1000.0f
+        );
+        cv::Point3f p3_w_m(
+            p3_w_h.at<float>(0)/1000.0f,
+            p3_w_h.at<float>(1)/1000.0f,
+            p3_w_h.at<float>(2)/1000.0f
+        );
+
+        float width, height;
+        if (!FusionGeometry::calcWidthHeightFrom3Points(p1_w_m, p2_w_m, p3_w_m, width, height)) {
+            spdlog::warn("计算宽高失败");
+        }
+
 
         // 6) 在世界系构姿态：X=法向；Y=线方向的平面投影；Z=X×Y；再正交
         auto norm = [](cv::Point3f v)->cv::Point3f{
@@ -256,95 +296,51 @@ int main() {
         double P = rad2deg(pitch);
         double R = rad2deg(yaw);
 
-        // —— 控制台输出（保持原样）
-        std::cout << std::fixed << std::setprecision(6);
-        std::cout << "[#" << i << "] P_world = (" << p_w_m.x << ", " << p_w_m.y << ", " << p_w_m.z << ") m";
-        std::cout << "           WPR = (" << W << ", " << P << ", " << R << ") deg\n";
-
+        spdlog::info("[#{}] P_world=({:.3f}, {:.3f}, {:.3f}) m, WPR=({:.1f}, {:.1f}, {:.1f}) deg, size(W,H)=({:.3f}, {:.3f})",
+             i, p_w_m.x, p_w_m.y, p_w_m.z, W, P, R, width, height);
         // =========================
-        // 可视化：在 vis 上画 OBB + 底边中点 + 文本（无底色，小号字体）
+        // 极简可视化（底边中点 + 8行文字，无背景）
         // =========================
 
-        // 画 OBB
+        // 1) 画 OBB
         drawRotRect(vis, rrect, cv::Scalar(0, 0, 0), 2);
 
-        // 画底边中点（像素）
+        // 2) 画底边中点
         cv::circle(vis, midPx, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
 
-        // 在中点旁边标注 xyz（m）与 WPR（deg）
-        std::ostringstream oss1, oss2;
-        oss1 << std::fixed << std::setprecision(3)
-             << "xyz(m)=(" << p_w_m.x << ", " << p_w_m.y << ", " << p_w_m.z << ")";
-        oss2 << std::fixed << std::setprecision(1)
-             << "WPR(deg)=(" << W << ", " << P << ", " << R << ")";
+        // 3) 组织 8 行文字
+        std::ostringstream oss[8];
+        oss[0] << "#" << i;
+        
+        oss[1] << "x=" << std::fixed << std::setprecision(3) << p_w_m.x;
+        oss[2] << "y=" << std::fixed << std::setprecision(3) << p_w_m.y;
+        oss[3] << "z=" << std::fixed << std::setprecision(3) << p_w_m.z;
+        oss[4] << "W=" << std::fixed << std::setprecision(1) << W;
+        oss[5] << "P=" << std::fixed << std::setprecision(1) << P;
+        oss[6] << "R=" << std::fixed << std::setprecision(1) << R;
+        oss[7] << "WH=(" << std::fixed << std::setprecision(1)
+               << width << "," << height << ")";
 
-        // 字体参数
-        const double fontScale = 0.45;
-        const int    thickness = 1;
-        const cv::Scalar txtColor(0, 0, 0);
+        // 4) 字体参数
+        const double      fontScale = 0.45;
+        const int         thickness = 1;
+        const cv::Scalar  txtColor(0, 0, 0);
+        const int         lineGap   = 4;
 
-        // 计算两行文字尺寸
-        int base1 = 0, base2 = 0;
-        cv::Size sz1 = cv::getTextSize(oss1.str(), cv::FONT_HERSHEY_SIMPLEX, fontScale, thickness, &base1);
-        cv::Size sz2 = cv::getTextSize(oss2.str(), cv::FONT_HERSHEY_SIMPLEX, fontScale, thickness, &base2);
-        const int lineGap = 4;                         // 两行之间的间隔像素
-        int boxW = (sz1.width > sz2.width) ? sz1.width : sz2.width;
-        const int boxH = sz1.height + lineGap + sz2.height;
+        // 单行高度
+        int base = 0;
+        cv::Size sz = cv::getTextSize("0", cv::FONT_HERSHEY_SIMPLEX, fontScale, thickness, &base);
+        int lineStep = sz.height + lineGap;
 
-        // OBB 的外接轴对齐矩形（用于简单碰撞检测）
-        cv::Rect obbBox = rrect.boundingRect() & cv::Rect(0,0,vis.cols,vis.rows);
+        // 5) 把文字锚点放在底边中点右下
+        cv::Point anchor((int)std::round(midPx.x + 8), (int)std::round(midPx.y + 8));
 
-        // 生成候选放置位置（文字包围框左上角）
-        std::array<cv::Point,4> candidates = {
-            cv::Point((int)std::round(midPx.x + 8),                (int)std::round(midPx.y - 8 - boxH)), // 右上
-            cv::Point((int)std::round(midPx.x + 8),                (int)std::round(midPx.y + 8)),        // 右下
-            cv::Point((int)std::round(midPx.x - 8 - boxW),         (int)std::round(midPx.y - 8 - boxH)), // 左上
-            cv::Point((int)std::round(midPx.x - 8 - boxW),         (int)std::round(midPx.y + 8))         // 左下
-        };
-
-        // 选择一个不与已占用区域/OBB 外接矩形相交的候选，并裁剪到图内
-        cv::Point chosenTL = candidates[0];
-        bool placed = false;
-        for (const auto& tl : candidates) {
-            cv::Rect box(tl.x, tl.y, boxW, boxH);
-            // 裁剪到图像范围内（避免越界）
-            if (box.x < 0) box.x = 0;
-            if (box.y < 0) box.y = 0;
-            if (box.x + box.width  > vis.cols) box.x = vis.cols - box.width;
-            if (box.y + box.height > vis.rows) box.y = vis.rows - box.height;
-
-            bool overlap = false;
-            // 与已放置文字框碰撞检测
-            for (const auto& used : usedLabelBoxes) {
-                if ( (box & used).area() > 0 ) { overlap = true; break; }
-            }
-            // 与当前 OBB 外接矩形碰撞检测
-            if (!overlap && (box & obbBox).area() > 0) overlap = true;
-
-            if (!overlap) { chosenTL = box.tl(); placed = true; break; }
+        // 6) 逐行绘制
+        for (int i = 0; i < 8; ++i) {
+            cv::Point org = anchor + cv::Point(0, i * lineStep + sz.height);
+            cv::putText(vis, oss[i].str(), org,
+                        cv::FONT_HERSHEY_SIMPLEX, fontScale, txtColor, thickness, cv::LINE_AA);
         }
-        if (!placed) {
-            // 全部相交也没关系，就用右上角（已裁剪）强制放置
-            cv::Rect box(candidates[0].x, candidates[0].y, boxW, boxH);
-            if (box.x < 0) box.x = 0;
-            if (box.y < 0) box.y = 0;
-            if (box.x + box.width  > vis.cols) box.x = vis.cols - box.width;
-            if (box.y + box.height > vis.rows) box.y = vis.rows - box.height;
-            chosenTL = box.tl();
-        }
-
-        // 依据包围框左上角，计算两行文字的基线位置
-        cv::Point line1Org(chosenTL.x,               chosenTL.y + sz1.height);
-        cv::Point line2Org(chosenTL.x,               chosenTL.y + sz1.height + lineGap + sz2.height);
-
-        // 实际绘制（无底色）
-        cv::putText(vis, oss1.str(), line1Org + cv::Point(2,0),
-                    cv::FONT_HERSHEY_SIMPLEX, fontScale, txtColor, thickness, cv::LINE_AA);
-        cv::putText(vis, oss2.str(), line2Org + cv::Point(2,0),
-                    cv::FONT_HERSHEY_SIMPLEX, fontScale, txtColor, thickness, cv::LINE_AA);
-
-        // 把本次文字包围框加入占用列表（稍加边距，减少紧贴）
-        usedLabelBoxes.emplace_back(chosenTL.x, chosenTL.y, boxW, boxH);
 
     }
 

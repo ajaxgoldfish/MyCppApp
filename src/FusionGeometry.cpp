@@ -203,17 +203,6 @@ bool FusionGeometry::bottomEdgePoints(const cv::RotatedRect& rect,
 
 
 //=================== 底边直线中点（由两条射线与拟合平面求交） ===================//
-// 输入：
-//   rect_points   —— 该目标区域内的 3D 点（相机系, m），用于 RANSAC 拟合平面
-//   ray_dir1_cam  —— 底边端点 p1 的相机系视线方向（未必归一化）
-//   ray_dir2_cam  —— 底边端点 p2 的相机系视线方向（未必归一化）
-// 输出：
-//   xyz_cam       —— 两交点的中点 M（相机系, m）
-//   n_cam         —— 拟合平面的单位法向（相机系，方向已规整）
-//   line_dir_cam  —— 底边方向的单位向量（相机系，沿 p1→p2）
-//
-// 说明：得到 (n_cam, line_dir_cam, xyz_cam) 后，后续可用
-//       n_cam 作为 Z 轴，line_dir_cam 作为 Y(或 X) 轴构建姿态。
 bool FusionGeometry::computeBottomLineMidInfo(
         const std::vector<Eigen::Vector3d>& rect_points,
         const Eigen::Vector3d&              ray_dir1_cam,
@@ -289,3 +278,175 @@ bool FusionGeometry::computeBottomLineMidInfo(
                              static_cast<float>(edge_dir.z()));
     return true;
 }
+
+//=================== 底边两个端点 + 另一个顶点 ===================//
+bool FusionGeometry::bottomEdgeWithThirdPoint(const cv::RotatedRect& rect,
+                                              cv::Point2f& p0,  // 底边左端
+                                              cv::Point2f& p1,  // 底边右端
+                                              cv::Point2f& p3)  // 非底边两点中的一个（取更靠近 p0 的那个）
+{
+    if (rect.size.width <= 0 || rect.size.height <= 0) return false;
+
+    cv::Point2f pts[4];
+    rect.points(pts);  // OpenCV 返回顺时针 4 顶点
+
+    // 1) 选“平均 y 最大”的那条边为底边（图像坐标 y 向下）
+    int ei = 0, ej = 1;        // 底边的两个顶点下标
+    float bestAvgY = -1e30f;
+
+    auto consider_edge = [&](int a, int b) {
+        float avgY = 0.5f * (pts[a].y + pts[b].y);
+        if (avgY > bestAvgY) { bestAvgY = avgY; ei = a; ej = b; }
+    };
+    consider_edge(0,1);
+    consider_edge(1,2);
+    consider_edge(2,3);
+    consider_edge(3,0);
+
+    // 2) 取出底边两个点
+    cv::Point2f b0 = pts[ei];
+    cv::Point2f b1 = pts[ej];
+
+    // 3) 可选：保证从左到右输出（按 x 升序）
+    if (b0.x > b1.x) std::swap(b0, b1);
+
+    p0 = b0;
+    p1 = b1;
+
+    // 4) 从剩余两个点中选一个作为 p3 —— 取与 p0 距离更近的那个
+    //    先找出剩余两个顶点下标
+    bool used[4] = {false,false,false,false};
+    used[ei] = true; used[ej] = true;
+
+    int rIdx[2]; int r = 0;
+    for (int k = 0; k < 4; ++k) if (!used[k]) rIdx[r++] = k;
+
+    const cv::Point2f& q0 = pts[rIdx[0]];
+    const cv::Point2f& q1 = pts[rIdx[1]];
+
+    float d0 = cv::norm(q0 - p0);
+    float d1 = cv::norm(q1 - p0);
+    p3 = (d0 <= d1) ? q0 : q1;
+
+    return true;
+}
+
+//=================== 底边直线中点（两条射线求中点 + 第三条射线交点） ===================//
+bool FusionGeometry::computeBottomLineMidInfo3(
+        const std::vector<Eigen::Vector3d>& rect_points,
+        const Eigen::Vector3d&              ray_dir1_cam,
+        const Eigen::Vector3d&              ray_dir2_cam,
+        const Eigen::Vector3d&              ray_dir3_cam,   // ← 新增：第三条射线
+        cv::Point3f&                        xyz_cam,        // 中点（仍仅用 1、2 两条射线计算）
+        cv::Vec3f&                          n_cam,
+        cv::Vec3f&                          line_dir_cam,
+        cv::Point3f&                        xyz1_cam,       // ← 新增输出：射线1与平面交点
+        cv::Point3f&                        xyz2_cam,       // ← 新增输出：射线2与平面交点
+        cv::Point3f&                        xyz3_cam        // ← 新增输出：射线3与平面交点
+    )
+{
+    if (rect_points.size() < 30) return false;
+
+    // 1) 用 RANSAC 拟合平面（相机系）
+    auto rect_pc = std::make_shared<open3d::geometry::PointCloud>();
+    rect_pc->points_.assign(rect_points.begin(), rect_points.end());
+
+    const double distance_threshold = 0.004; // 4 mm
+    const int    ransac_n           = 3;
+    const int    num_iterations     = 300;
+
+    Eigen::Vector4d plane; std::vector<size_t> inliers;
+    std::tie(plane, inliers) = rect_pc->SegmentPlane(
+        distance_threshold, ransac_n, num_iterations
+    );
+    if (inliers.size() < 20) return false;
+
+    // 2) 规范化平面参数 [n | d]，并做方向规整（让法向朝向相机 +Z）
+    Eigen::Vector3d n(plane[0], plane[1], plane[2]);
+    double d = plane[3];
+
+    const double L = n.norm();
+    if (L <= 0.0) return false;
+    n /= L; d /= L;
+
+    if (n.z() < 0) { n = -n; d = -d; } // 翻转时同步翻 d，保持 n·X + d = 0
+
+    // 3) 三条射线与平面求交（原逻辑对 1、2 射线保持不变，仅新增第 3 条）
+    if (ray_dir1_cam.norm() == 0.0 || ray_dir2_cam.norm() == 0.0 || ray_dir3_cam.norm() == 0.0) return false;
+    const Eigen::Vector3d dir1 = ray_dir1_cam.normalized();
+    const Eigen::Vector3d dir2 = ray_dir2_cam.normalized();
+    const Eigen::Vector3d dir3 = ray_dir3_cam.normalized();   // 新增
+
+    const double nd1 = n.dot(dir1);
+    const double nd2 = n.dot(dir2);
+    const double nd3 = n.dot(dir3);                           // 新增
+    if (std::abs(nd1) < 1e-8 || std::abs(nd2) < 1e-8 || std::abs(nd3) < 1e-8) return false; // 任一近乎平行则失败
+
+    const double t1 = -d / nd1;
+    const double t2 = -d / nd2;
+    const double t3 = -d / nd3;                               // 新增
+    if (t1 <= 0 || t2 <= 0 || t3 <= 0) return false;          // 交点在相机后方或不合理
+
+    const Eigen::Vector3d P1 = t1 * dir1;
+    const Eigen::Vector3d P2 = t2 * dir2;
+    const Eigen::Vector3d P3 = t3 * dir3;                     // 新增
+
+    // 4) 中点与底边方向（保持原逻辑：仅由 P1、P2 计算）
+    const Eigen::Vector3d M  = 0.5 * (P1 + P2);
+    Eigen::Vector3d edge_dir = P2 - P1;
+    const double edge_len = edge_dir.norm();
+    if (edge_len < 1e-8) return false; // 两交点过近/数值不稳定
+    edge_dir /= edge_len;
+
+    // （可选）方向一致性：让 (edge_dir × n).z >= 0（保持原版一致）
+    Eigen::Vector3d x_tmp = edge_dir.cross(n);
+    if (x_tmp.z() < 0) edge_dir = -edge_dir;
+
+    // 5) 输出（含新增三交点）
+    xyz_cam      = cv::Point3f(static_cast<float>(M.x()),
+                               static_cast<float>(M.y()),
+                               static_cast<float>(M.z()));
+    n_cam        = cv::Vec3f(static_cast<float>(n.x()),
+                             static_cast<float>(n.y()),
+                             static_cast<float>(n.z()));
+    line_dir_cam = cv::Vec3f(static_cast<float>(edge_dir.x()),
+                             static_cast<float>(edge_dir.y()),
+                             static_cast<float>(edge_dir.z()));
+
+    xyz1_cam     = cv::Point3f(static_cast<float>(P1.x()),
+                               static_cast<float>(P1.y()),
+                               static_cast<float>(P1.z()));
+    xyz2_cam     = cv::Point3f(static_cast<float>(P2.x()),
+                               static_cast<float>(P2.y()),
+                               static_cast<float>(P2.z()));
+    xyz3_cam     = cv::Point3f(static_cast<float>(P3.x()),
+                               static_cast<float>(P3.y()),
+                               static_cast<float>(P3.z()));
+
+    return true;
+}
+
+
+bool FusionGeometry::calcWidthHeightFrom3Points(
+    const cv::Point3f& p1_w_m,
+    const cv::Point3f& p2_w_m,
+    const cv::Point3f& p3_w_m,
+    float& width,
+    float& height)
+{
+    // 以 p1 为公共顶点
+    const cv::Point3f v12 = p2_w_m - p1_w_m; // 宽方向向量
+    const cv::Point3f v13 = p3_w_m - p1_w_m; // 高方向向量
+
+    const float w = std::sqrt(v12.x * v12.x + v12.y * v12.y + v12.z * v12.z);
+    const float h = std::sqrt(v13.x * v13.x + v13.y * v13.y + v13.z * v13.z);
+
+    // 基本健壮性检查
+    if (!std::isfinite(w) || !std::isfinite(h)) return false;
+
+    width  = w;
+    height = h;
+    return true;
+}
+
+

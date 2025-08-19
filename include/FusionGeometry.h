@@ -40,6 +40,35 @@ public:
         cv::Vec3f&                          line_dir_cam
     );
 
+    static bool computeBottomLineMidInfo3(
+        const std::vector<Eigen::Vector3d>& rect_points,
+        const Eigen::Vector3d&              ray_dir1_cam,
+        const Eigen::Vector3d&              ray_dir2_cam,
+        const Eigen::Vector3d&              ray_dir3_cam,   // ← 新增：第三条射线
+        cv::Point3f&                        xyz_cam,        // 中点（仍仅用 1、2 两条射线计算）
+        cv::Vec3f&                          n_cam,
+        cv::Vec3f&                          line_dir_cam,
+        cv::Point3f&                        xyz1_cam,       // ← 新增输出：射线1与平面交点
+        cv::Point3f&                        xyz2_cam,       // ← 新增输出：射线2与平面交点
+        cv::Point3f&                        xyz3_cam        // ← 新增输出：射线3与平面交点
+    );
+
+    //=================== 底边两个端点 + 另一个顶点 ===================//
+    static bool bottomEdgeWithThirdPoint(const cv::RotatedRect& rect,
+                                                  cv::Point2f& p0,  // 底边左端
+                                                  cv::Point2f& p1,  // 底边右端
+                                                  cv::Point2f& p3);  // 非底边两点中的一个（取更靠近 p0 的那个）
+
+    static bool calcWidthHeightFrom3Points(
+    const cv::Point3f& p1_w_m,   // 公共顶点
+    const cv::Point3f& p2_w_m,   // 与 p1 构成“宽”的另一点
+    const cv::Point3f& p3_w_m,   // 与 p1 构成“高”的另一点
+    float& width,                // 输出：宽（与输入单位相同）
+    float& height                // 输出：高（与输入单位相同）
+    );
+
+
+
     // 获取内参
     static const cv::Mat& getIntrinsic();
 
