@@ -1,14 +1,18 @@
 #include <opencv2/opencv.hpp>
 #include <filesystem>
-#include <iostream>
+#include <chrono>
 #include <spdlog/spdlog.h>
-#include <pcl/io/pcd_io.h>
-#include <pcl/point_types.h>
+// 如果需要输出到文件，可额外引入：#include <spdlog/sinks/basic_file_sink.h>
 #include "BoxPosePipeline.h"
 
 namespace fs = std::filesystem;
 
 int main() {
+    // ====== 0) spdlog 基础配置（可按需调整）======
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v"); // 彩色等级 + 时间
+    spdlog::set_level(spdlog::level::info);                    // 运行时日志门槛
+    spdlog::flush_on(spdlog::level::err);                      // 遇到 error 立刻 flush
+
     // ====== 1) 初始化 Pipeline（只初始化一次）======
     BoxPosePipeline::Options opt;
     opt.model_path = "models/end2end.onnx";
@@ -19,21 +23,20 @@ int main() {
 
     BoxPosePipeline pipeline(opt);
     if (!pipeline.initialize()) {
-        std::cerr << "[FATAL] pipeline.initialize() 失败\n";
+        spdlog::critical("pipeline.initialize() 失败");
         return -1;
     }
 
     // ====== 2) 遍历 res 目录 ======
     const fs::path root = "res";
     if (!fs::exists(root) || !fs::is_directory(root)) {
-        std::cerr << "[FATAL] 目录不存在: " << root << "\n";
+        spdlog::critical("目录不存在: {}", root.string());
         return -1;
     }
 
     size_t ok_cnt = 0, skip_cnt = 0, err_cnt = 0;
 
     for (const auto& dirEnt : fs::directory_iterator(root)) {
-
         if (!dirEnt.is_directory()) continue;
 
         const fs::path caseDir = dirEnt.path();
@@ -41,7 +44,7 @@ int main() {
         const fs::path pcdPath = caseDir / "pcAll.pcd";
 
         if (!fs::exists(rgbPath) || !fs::exists(pcdPath)) {
-            std::cout << "[SKIP] 缺少文件: " << caseDir << " （需要 rgb.jpg 与 pcAll.pcd）\n";
+            spdlog::warn("[SKIP] 缺少文件: {} （需要 rgb.jpg 与 pcAll.pcd）", caseDir.string());
             ++skip_cnt;
             continue;
         }
@@ -51,63 +54,48 @@ int main() {
         // ====== 3) 读取输入 ======
         cv::Mat rgb = cv::imread(rgbPath.string(), cv::IMREAD_COLOR);
         if (rgb.empty()) {
-            std::cout << "[ERR ] 无法读取图片: " << rgbPath << "\n";
-            ++err_cnt; continue;
-        }
-
-        // —— 用 PCL 读取 .pcd（仅 XYZ）再转 open3d::geometry::PointCloud —— //
-        open3d::geometry::PointCloud pc;
-        bool ok = false;
-
-        pcl::PointCloud<pcl::PointXYZ> cloud_xyz;
-        if (pcl::io::loadPCDFile<pcl::PointXYZ>(pcdPath.string(), cloud_xyz) == 0 &&
-            !cloud_xyz.empty()) {
-            pc.Clear();
-            pc.points_.reserve(cloud_xyz.size());
-            for (const auto& p : cloud_xyz.points) {
-                pc.points_.emplace_back(double(p.x), double(p.y), double(p.z));
-            }
-            ok = true;
-            }
-
-        if (!ok || pc.points_.empty()) {
-            std::cerr << "[ERR ] PCL 读取失败或点云为空: " << pcdPath << "\n";
+            spdlog::error("无法读取图片: {}", rgbPath.string());
             ++err_cnt;
             continue;
         }
 
-        spdlog::info("read");
+        open3d::geometry::PointCloud pc;
+        if (!open3d::io::ReadPointCloud(pcdPath.string(), pc) || pc.points_.empty()) {
+            spdlog::error("点云读取失败或为空: {}", pcdPath.string());
+            ++err_cnt;
+            continue;
+        }
 
         // ====== 4) 执行 Pipeline ======
         std::vector<BoxPoseResult> results;
         cv::Mat vis;
         bool ok1 = pipeline.run(rgb, pc, results, &vis);
         if (!ok1 || vis.empty()) {
-            std::cout << "[ERR ] pipeline.run 失败: " << caseDir << "\n";
-            ++err_cnt; continue;
+            spdlog::error("pipeline.run 失败: {}", caseDir.string());
+            ++err_cnt;
+            continue;
         }
 
         // ====== 5) 写结果到同目录 ======
         const fs::path outPath = caseDir / "vis_on_orig.jpg";
         if (!cv::imwrite(outPath.string(), vis)) {
-            std::cout << "[ERR ] 写文件失败: " << outPath << "\n";
-            ++err_cnt; continue;
+            spdlog::error("写文件失败: {}", outPath.string());
+            ++err_cnt;
+            continue;
         }
 
         auto t1 = std::chrono::steady_clock::now();  // ⏱ 结束计时
         double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-        std::cout << "[ OK ] " << caseDir.filename().string()
-                  << " -> " << outPath
-                  << "，目标数=" << results.size()
-                  << "，耗时=" << elapsed_ms << " ms\n";
+        spdlog::info("[ OK ] {} -> {}，目标数={}，耗时={:.3f} ms",
+                     caseDir.filename().string(),
+                     outPath.string(),
+                     results.size(),
+                     elapsed_ms);
 
         ++ok_cnt;
     }
 
-
-    std::cout << "完成：OK=" << ok_cnt
-              << ", SKIP=" << skip_cnt
-              << ", ERR="  << err_cnt << "\n";
+    spdlog::info("完成：OK={}, SKIP={}, ERR={}", ok_cnt, skip_cnt, err_cnt);
     return (err_cnt > 0 && ok_cnt == 0) ? -1 : 0;
 }
