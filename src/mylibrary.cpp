@@ -5,7 +5,6 @@
 
 #include "mylibrary.h"          // 声明：bs_yzx_init / bs_yzx_object_detection_lanxin
 using nlohmann::json;
-
 namespace fs = std::filesystem;
 
 // ====== 配置：最大写入目标数 ======
@@ -164,7 +163,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
             {"angle_a", b.angle_a}, {"angle_b", b.angle_b}, {"angle_c", b.angle_c}
         });
     }
-
     const fs::path jsonPath = caseDir / "boxes.json";
     std::ofstream ofs(jsonPath);
     if (!ofs) {
@@ -174,7 +172,5 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         ofs.close();
         spdlog::info("JSON 已写入: {}", jsonPath.string());
     }
-
-
     return n_write; // 返回写入个数
 }
