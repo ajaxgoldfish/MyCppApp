@@ -1,4 +1,4 @@
-// bs_yzx_api.cpp
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
