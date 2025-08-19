@@ -4,6 +4,7 @@
 #endif
 
 #include "mylibrary.h"          // 声明：bs_yzx_init / bs_yzx_object_detection_lanxin
+using nlohmann::json;
 
 namespace fs = std::filesystem;
 
@@ -145,6 +146,35 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
 
     spdlog::info("[ OK ] taskId={} -> {}，目标数={}（写入 {} 个），耗时={:.3f} ms",
                  taskId, outPath.string(), total, n_write, elapsed_ms);
+
+    // 6) 写入 JSON
+    json j;
+    j["taskId"]     = taskId;
+    j["elapsed_ms"] = elapsed_ms;
+    j["total"]      = total;
+    j["n_write"]    = n_write;
+    j["out_image"]  = outPath.string();
+
+    auto& arr = j["boxes"] = json::array();
+    for (int i = 0; i < n_write; ++i) {
+        const auto& b = boxArr[i];
+        arr.push_back({
+            {"x", b.x}, {"y", b.y}, {"z", b.z},
+            {"width", b.width}, {"height", b.height},
+            {"angle_a", b.angle_a}, {"angle_b", b.angle_b}, {"angle_c", b.angle_c}
+        });
+    }
+
+    const fs::path jsonPath = caseDir / "boxes.json";
+    std::ofstream ofs(jsonPath);
+    if (!ofs) {
+        spdlog::error("写 JSON 失败（无法打开文件）: {}", jsonPath.string());
+    } else {
+        ofs << std::setw(2) << j;
+        ofs.close();
+        spdlog::info("JSON 已写入: {}", jsonPath.string());
+    }
+
 
     return n_write; // 返回写入个数
 }

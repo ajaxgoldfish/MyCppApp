@@ -16,6 +16,8 @@
 #include <string>
 #include "LanxinCamera.h"
 #include "BoxPosePipeline.h"
+#include <nlohmann/json.hpp>
+
 using namespace std;
 using namespace open3d::geometry;
 
