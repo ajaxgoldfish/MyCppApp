@@ -33,6 +33,8 @@ add_executable(MyCppApp src/main.cpp
                         src/LanxinCamera.cpp
                         src/MaskRCNNRunner.cpp
                         src/FusionGeometry.cpp
+        src/BoxPosePipeline.cpp
+        include/BoxPosePipeline.h
 )
 
 target_include_directories(MyCppApp PRIVATE ${CMAKE_SOURCE_DIR}/include)
