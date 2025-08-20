@@ -64,14 +64,14 @@ target_link_libraries(MyCppApp PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxrun
 add_library(yzx_vision_zzb SHARED
         src/mylibrary.cpp
         src/LanxinCamera.cpp
-        src/MaskRCNNRunner.cpp
+        src/MaskRCNNRunnerGPU.cpp
         src/FusionGeometry.cpp
         src/BoxPosePipeline.cpp
 )
 
 target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lanxin/include)
-target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/third_party/onnxruntime/include)
+target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/third_party/onnxruntime-gpu/include)
 target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/include)
 
 
@@ -87,5 +87,5 @@ target_link_libraries(yzx_vision_zzb PRIVATE ${PROJECT_SOURCE_DIR}/third_party/f
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avutil.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swresample.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swscale.lib)
-target_link_libraries(yzx_vision_zzb PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxruntime/lib/onnxruntime.lib)
+target_link_libraries(yzx_vision_zzb PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-gpu/lib/onnxruntime.lib)
 

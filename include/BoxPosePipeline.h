@@ -66,7 +66,6 @@ private:
                       const std::pair<cv::RotatedRect, cv::Point2f>& rect_mid,
                       const std::vector<Proj>& proj,
                       const open3d::geometry::PointCloud& pc_cam,
-                      cv::Mat* vis_io,
                       BoxPoseResult& out);
     static void drawEightLinesCentered_(cv::Mat& vis, const cv::RotatedRect& rrect, int id,
                                         const cv::Point3f& p_w_m, const cv::Vec3f& wpr_deg,

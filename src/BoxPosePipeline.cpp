@@ -89,7 +89,6 @@ bool BoxPosePipeline::run(const cv::Mat& rgb,
                                rect_and_mid[i],
                                proj,
                                pc_cam,
-                               /*vis_io=*/nullptr,
                                res);
         if (ok) {
             tmp[i] = std::move(res);  // 按下标写回，无需锁
@@ -119,7 +118,14 @@ bool BoxPosePipeline::run(const cv::Mat& rgb,
 bool BoxPosePipeline::inferMasks_(const cv::Mat& rgb,
                                   cv::Mat& vis,
                                   std::vector<cv::Mat1b>& masks) {
+    auto t0 = std::chrono::steady_clock::now();  // ⏱ 开始计时
+
     std::vector<Ort::Value> outs = runner_->inferRaw(rgb);
+
+    auto t1 = std::chrono::steady_clock::now();  // ⏱ 结束计时
+    double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    spdlog::info("paint{}",elapsed_ms);
     vis = runner_->paint(rgb, outs, options_.score_thr, options_.mask_thr);
     if (vis.empty()) vis = rgb.clone();
     masks = runner_->inferMasks(rgb, outs, options_.score_thr, options_.mask_thr);
@@ -168,7 +174,6 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
                                    const std::pair<cv::RotatedRect, cv::Point2f>& rect_mid,
                                    const std::vector<Proj>& proj,
                                    const open3d::geometry::PointCloud& pc_cam,
-                                   cv::Mat* vis_io,
                                    BoxPoseResult& out) {
     const cv::RotatedRect& rrect = rect_mid.first;
     const cv::Point2f&     midPx = rect_mid.second;
@@ -351,15 +356,6 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     out.p1_w_m    = p1_w_m;
     out.p2_w_m    = p2_w_m;
     out.p3_w_m    = p3_w_m;
-
-    // —— 可视化（与原版一致：OBB + 中点 + 8 行文字）
-    if (vis_io) {
-        drawRotRect(*vis_io, rrect, cv::Scalar(0, 0, 0), 2);
-        cv::circle(*vis_io, midPx, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
-        drawEightLinesCentered_(*vis_io, rrect, out.id, out.xyz_m, out.wpr_deg,
-                                out.width_m, out.height_m, midPx);
-    }
-
     return true;
 }
 
