@@ -18,6 +18,7 @@
 #include "LanxinCamera.h"
 #include "BoxPosePipeline.h"
 #include <nlohmann/json.hpp>
+#include <open3d/io/PointCloudIO.h>
 
 using namespace std;
 using namespace open3d::geometry;

@@ -106,7 +106,7 @@ bool BoxPosePipeline::run(const cv::Mat& rgb,
         drawRotRect(vis, r.obb, cv::Scalar(0, 0, 0), 2);
         cv::circle(vis, r.bottomMidPx, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
         drawEightLinesCentered_(vis, r.obb, r.id, r.xyz_m, r.wpr_deg,
-                                r.width_m, r.height_m, r.bottomMidPx);
+                                r.width_m, r.height_m);
     }
 
     if (vis_out) *vis_out = vis;
@@ -125,7 +125,7 @@ bool BoxPosePipeline::inferMasks_(const cv::Mat& rgb,
     auto t1 = std::chrono::steady_clock::now();  // ⏱ 结束计时
     double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-    spdlog::info("paint{}",elapsed_ms);
+    spdlog::info("paint:{}",elapsed_ms);
     vis = runner_->paint(rgb, outs, options_.score_thr, options_.mask_thr);
     if (vis.empty()) vis = rgb.clone();
     masks = runner_->inferMasks(rgb, outs, options_.score_thr, options_.mask_thr);
@@ -169,16 +169,14 @@ void BoxPosePipeline::projectPointCloud_(const open3d::geometry::PointCloud& pc_
     }
 }
 
-// ===================== 单个实例完整求解 =====================
 bool BoxPosePipeline::solveOneBox_(size_t idx,
                                    const std::pair<cv::RotatedRect, cv::Point2f>& rect_mid,
                                    const std::vector<Proj>& proj,
                                    const open3d::geometry::PointCloud& pc_cam,
-                                   BoxPoseResult& out) {
+                                   BoxPoseResult& out) const {
     const cv::RotatedRect& rrect = rect_mid.first;
     const cv::Point2f&     midPx = rect_mid.second;
 
-    // 0) 收集该 OBB 内的点云（相机系，单位 m）
     std::vector<Eigen::Vector3d> rect_points;
     rect_points.reserve(4096);
     for (const auto& pr : proj) {
@@ -190,23 +188,19 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         spdlog::info("[#{}] 框内点过少，跳过 ({} 点)", idx, rect_points.size());
         return false;
     }
-
-    // 1) OBB 底边两个像素点 + 第三个点
     cv::Point2f p0, p1, p3;
     if (!FusionGeometry::bottomEdgeWithThirdPoint(rrect, p0, p1, p3)) {
         spdlog::info("[#{}] 无法获得底边两点/第三点", idx);
         return false;
     }
 
-    // 2) 像素(u,v) -> 相机系单位视线
     Eigen::Vector3d ray1_cam = pix2dir(p0);
     Eigen::Vector3d ray2_cam = pix2dir(p1);
     Eigen::Vector3d ray3_cam = pix2dir(p3);
 
-    // 3) 拟合平面 + 三射线与平面求交（相机系：中点/法向/线方向）
     cv::Point3f xyz_cam;
     cv::Vec3f   n_cam, line_cam;
-    cv::Point3f xyz1_cam, xyz2_cam, xyz3_cam; // 三个交点（相机系，m）
+    cv::Point3f xyz1_cam, xyz2_cam, xyz3_cam;
 
     if (!FusionGeometry::computeBottomLineMidInfo3(
             rect_points,
@@ -217,11 +211,9 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         return false;
     }
 
-    // 4) 轴重排（相机 -> 厂商相机轴）：(x,y,z)->(z,-x,-y)
     cv::Vec3f n_cam_re    = reorder_vec3f(n_cam);
     cv::Vec3f line_cam_re = reorder_vec3f(line_cam);
 
-    // 点（相机系 m）先重排再转 mm（与外参匹配），齐次
     cv::Vec4f p_cam_re_mm(
         xyz_cam.z * 1000.0f,
        -xyz_cam.x * 1000.0f,
@@ -229,18 +221,15 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         1.0f
     );
 
-    // 5) 外参（World <- 厂商相机，mm）
     cv::Mat T_wc = T_wc_.clone();               // 4x4, CV_32F
     cv::Mat R_wc_33 = T_wc(cv::Rect(0,0,3,3));  // 3x3
     cv::Mat t_wc_31 = T_wc(cv::Rect(3,0,1,3));  // 3x1
 
-    // —— 法向/线方向：只旋转
     cv::Mat n_w_cv    = R_wc_33 * cv::Mat(n_cam_re);
     cv::Mat line_w_cv = R_wc_33 * cv::Mat(line_cam_re);
     cv::Point3f n_w(n_w_cv.at<float>(0), n_w_cv.at<float>(1), n_w_cv.at<float>(2));
     cv::Point3f y_w(line_w_cv.at<float>(0), line_w_cv.at<float>(1), line_w_cv.at<float>(2));
 
-    // —— 中点：p_world = T_wc * p_cam_re_mm（得到 mm）→ m
     cv::Mat p_w_h = T_wc * cv::Mat(p_cam_re_mm);
     cv::Point3f p_w_m(
         p_w_h.at<float>(0)/1000.0f,
@@ -248,7 +237,6 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         p_w_h.at<float>(2)/1000.0f
     );
 
-    // ========== 三个交点的重排 + 转换 ==========
     auto reorder_point = [](const cv::Point3f& p)->cv::Vec4f {
         return cv::Vec4f(p.z * 1000.0f, -p.x * 1000.0f, -p.y * 1000.0f, 1.0f);
     };
@@ -282,7 +270,6 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         spdlog::warn("[#{}] 计算宽高失败", idx);
     }
 
-    // 6) 在世界系构姿态：X=法向；Y=线方向的平面投影；Z=X×Y；再正交
     auto norm_local = [](cv::Point3f v)->cv::Point3f{
         float L = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
         if (L < 1e-9f) return cv::Point3f(0,0,0);
@@ -295,7 +282,6 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
     };
 
-    // 可选：统一法向使其背向相机（让法向指向相机反方向）
     cv::Point3f C_w_m(
         t_wc_31.at<float>(0)/1000.0f,
         t_wc_31.at<float>(1)/1000.0f,
@@ -304,7 +290,6 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     cv::Point3f CP(C_w_m.x - p_w_m.x, C_w_m.y - p_w_m.y, C_w_m.z - p_w_m.z);
     if (dot_local(n_w, CP) > 0) n_w = { -n_w.x, -n_w.y, -n_w.z };
 
-    // 让线方向的 y 分量大于 0（约定）
     if (y_w.y < 0) y_w = { -y_w.x, -y_w.y, -y_w.z };
 
     cv::Point3f Xw = norm_local(n_w);
@@ -313,7 +298,7 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         y_w.y - dot_local(y_w, Xw)*Xw.y,
         y_w.z - dot_local(y_w, Xw)*Xw.z
     ));
-    if (Yw.x==0 && Yw.y==0 && Yw.z==0) { // 退化兜底
+    if (Yw.x==0 && Yw.y==0 && Yw.z==0) {
         cv::Point3f ref(0,1,0);
         if (std::fabs(dot_local(ref, Xw)) > 0.95f) ref = {1,0,0};
         Yw = norm_local(cv::Point3f(
@@ -325,7 +310,6 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     cv::Point3f Zw = norm_local(cross_local(Xw, Yw));
     Yw = norm_local(cross_local(Zw, Xw));
 
-    // 7) Rw（列向量 X/Y/Z） & 提取 ZYX->WPR
     Eigen::Matrix3d Rw;
     Rw << Xw.x, Yw.x, Zw.x,
           Xw.y, Yw.y, Zw.y,
@@ -340,10 +324,6 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     double P = rad2deg(pitch);
     double R = rad2deg(yaw);
 
-    spdlog::info("[#{}] P_world=({:.3f}, {:.3f}, {:.3f}) m, WPR=({:.1f}, {:.1f}, {:.1f}) deg, size(W,H)=({:.3f}, {:.3f})",
-                 idx, p_w_m.x, p_w_m.y, p_w_m.z, W, P, R, width, height);
-
-    // —— 输出结果填充
     out.id        = static_cast<int>(idx);
     out.xyz_m     = p_w_m;
     out.wpr_deg   = cv::Vec3f(static_cast<float>(W),
@@ -359,15 +339,13 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     return true;
 }
 
-// ===================== 文本绘制 =====================
 void BoxPosePipeline::drawEightLinesCentered_(cv::Mat& vis,
                                               const cv::RotatedRect& rrect,
                                               int id,
                                               const cv::Point3f& p_w_m,
                                               const cv::Vec3f& wpr_deg,
                                               float width_m,
-                                              float height_m,
-                                              const cv::Point2f& midPx) {
+                                              float height_m) {
     std::array<std::ostringstream, 8> oss;
     oss[0] << "#" << id;
     oss[1] << "x=" << std::fixed << std::setprecision(3) << p_w_m.x;

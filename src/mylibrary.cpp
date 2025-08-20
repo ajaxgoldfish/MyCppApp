@@ -100,6 +100,11 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
 
     auto t0 = std::chrono::steady_clock::now();
 
+    // 0) 结果目录：res/<taskId>/
+    const fs::path caseDir = fs::path(g_root_dir) / std::to_string(taskId);
+    std::error_code ec_mkdir;
+    fs::create_directories(caseDir, ec_mkdir); // 目录不存在则创建
+
     // 1) 从相机抓图像
     cv::Mat rgb;
     if (g_camera->CapFrame(rgb) != 0 || rgb.empty()) {
@@ -107,11 +112,33 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         return -22;
     }
 
+    // 1.1 保存原始 RGB
+    const fs::path rgbPath = caseDir / "rgb_orig.jpg";
+    if (!cv::imwrite(rgbPath.string(), rgb)) {
+        spdlog::warn("保存原始 RGB 失败: {}", rgbPath.string()); // 非致命
+    } else {
+        spdlog::info("原始 RGB 已保存: {}", rgbPath.string());
+    }
+
     // 2) 从相机抓点云
     open3d::geometry::PointCloud pc;
     if (g_camera->CapFrame(pc) != 0 || pc.points_.empty()) {
         spdlog::error("相机获取点云帧失败或为空");
         return -23;
+    }
+
+    const fs::path pcdPath = caseDir / "cloud_orig.pcd";
+
+    open3d::io::WritePointCloudOption opt;
+    opt.write_ascii    = open3d::io::WritePointCloudOption::IsAscii::Ascii;          // ASCII
+    opt.compressed     = open3d::io::WritePointCloudOption::Compressed::Uncompressed; // 不压缩
+    opt.print_progress = false;
+
+    bool ok_pcd = open3d::io::WritePointCloud(pcdPath.string(), pc, opt);
+    if (!ok_pcd) {
+        spdlog::warn("保存原始点云失败: {}", pcdPath.string());
+    } else {
+        spdlog::info("原始点云已保存: {}", pcdPath.string());
     }
 
     // 3) 执行 Pipeline
@@ -124,13 +151,9 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     }
 
     // 4) 输出可视化到 res/<taskId>/vis_on_orig.jpg
-    const fs::path caseDir = fs::path(g_root_dir) / std::to_string(taskId);
     const fs::path outPath = caseDir / "vis_on_orig.jpg";
-    std::error_code ec;
-    fs::create_directories(caseDir, ec); // 目录不存在则创建
     if (!cv::imwrite(outPath.string(), vis)) {
-        spdlog::error("写文件失败: {}", outPath.string());
-        // 非致命
+        spdlog::error("写可视化文件失败: {}", outPath.string()); // 非致命
     }
 
     auto t1 = std::chrono::steady_clock::now();
@@ -146,13 +169,15 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     spdlog::info("[ OK ] taskId={} -> {}，目标数={}（写入 {} 个），耗时={:.3f} ms",
                  taskId, outPath.string(), total, n_write, elapsed_ms);
 
-    // 6) 写入 JSON
+    // 6) 写入 JSON（增加原始数据文件路径）
     json j;
     j["taskId"]     = taskId;
     j["elapsed_ms"] = elapsed_ms;
     j["total"]      = total;
     j["n_write"]    = n_write;
     j["out_image"]  = outPath.string();
+    j["raw_rgb"]    = rgbPath.string();
+    j["raw_pcd"]    = pcdPath.string();
 
     auto& arr = j["boxes"] = json::array();
     for (int i = 0; i < n_write; ++i) {
