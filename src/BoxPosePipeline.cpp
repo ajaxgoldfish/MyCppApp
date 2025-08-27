@@ -174,34 +174,38 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
                                    const std::vector<Proj>& proj,
                                    const open3d::geometry::PointCloud& pc_cam,
                                    BoxPoseResult& out) const {
-    const cv::RotatedRect& rrect = rect_mid.first;
-    const cv::Point2f&     midPx = rect_mid.second;
+    const cv::RotatedRect& rrect = rect_mid.first;   // 2D旋转矩形（检测框）
+    const cv::Point2f&     midPx = rect_mid.second;  // 框底边中点（像素坐标）
 
+    // ===== 1. 从点云中筛选出投影落在矩形框内的点 =====
     std::vector<Eigen::Vector3d> rect_points;
     rect_points.reserve(4096);
     for (const auto& pr : proj) {
-        if (inRotRectFast(rrect, pr.u, pr.v)) {
+        if (inRotRectFast(rrect, pr.u, pr.v)) {      // 判断像素是否在旋转矩形内
             rect_points.push_back(pc_cam.points_[pr.pid]);
         }
     }
-    if (rect_points.size() < 30) {
+    if (rect_points.size() < 30) {                   // 点数太少直接放弃
         spdlog::info("[#{}] 框内点过少，跳过 ({} 点)", idx, rect_points.size());
         return false;
     }
+
+    // ===== 2. 获得矩形底边两点和第三点，用于确定姿态方向 =====
     cv::Point2f p0, p1, p3;
     if (!FusionGeometry::bottomEdgeWithThirdPoint(rrect, p0, p1, p3)) {
         spdlog::info("[#{}] 无法获得底边两点/第三点", idx);
         return false;
     }
 
+    // ===== 3. 像素坐标转相机系射线方向 =====
     Eigen::Vector3d ray1_cam = pix2dir(p0);
     Eigen::Vector3d ray2_cam = pix2dir(p1);
     Eigen::Vector3d ray3_cam = pix2dir(p3);
 
+    // ===== 4. 基于点云与射线，估算底边中点、平面法向量、方向向量等信息 =====
     cv::Point3f xyz_cam;
     cv::Vec3f   n_cam, line_cam;
     cv::Point3f xyz1_cam, xyz2_cam, xyz3_cam;
-
     if (!FusionGeometry::computeBottomLineMidInfo3(
             rect_points,
             ray1_cam, ray2_cam, ray3_cam,
@@ -211,25 +215,28 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         return false;
     }
 
-    cv::Vec3f n_cam_re    = reorder_vec3f(n_cam);
-    cv::Vec3f line_cam_re = reorder_vec3f(line_cam);
+    // ===== 5. 坐标变换：相机系 → 世界系 =====
+    cv::Vec3f n_cam_re    = reorder_vec3f(n_cam);    // 相机系法向量重排
+    cv::Vec3f line_cam_re = reorder_vec3f(line_cam); // 相机系直线方向重排
 
+    // 相机系点转齐次坐标 (单位：mm)，再乘 T_wc 得到世界系
     cv::Vec4f p_cam_re_mm(
         xyz_cam.z * 1000.0f,
        -xyz_cam.x * 1000.0f,
        -xyz_cam.y * 1000.0f,
         1.0f
     );
+    cv::Mat T_wc = T_wc_.clone();               // 相机到世界的4x4变换矩阵
+    cv::Mat R_wc_33 = T_wc(cv::Rect(0,0,3,3));  // 旋转部分
+    cv::Mat t_wc_31 = T_wc(cv::Rect(3,0,1,3));  // 平移部分
 
-    cv::Mat T_wc = T_wc_.clone();               // 4x4, CV_32F
-    cv::Mat R_wc_33 = T_wc(cv::Rect(0,0,3,3));  // 3x3
-    cv::Mat t_wc_31 = T_wc(cv::Rect(3,0,1,3));  // 3x1
-
+    // 法向量、直线方向旋转到世界坐标系
     cv::Mat n_w_cv    = R_wc_33 * cv::Mat(n_cam_re);
     cv::Mat line_w_cv = R_wc_33 * cv::Mat(line_cam_re);
     cv::Point3f n_w(n_w_cv.at<float>(0), n_w_cv.at<float>(1), n_w_cv.at<float>(2));
     cv::Point3f y_w(line_w_cv.at<float>(0), line_w_cv.at<float>(1), line_w_cv.at<float>(2));
 
+    // 底边中点坐标（世界系，米）
     cv::Mat p_w_h = T_wc * cv::Mat(p_cam_re_mm);
     cv::Point3f p_w_m(
         p_w_h.at<float>(0)/1000.0f,
@@ -237,39 +244,30 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         p_w_h.at<float>(2)/1000.0f
     );
 
+    // 三个辅助点的世界系坐标，用于计算长宽
     auto reorder_point = [](const cv::Point3f& p)->cv::Vec4f {
         return cv::Vec4f(p.z * 1000.0f, -p.x * 1000.0f, -p.y * 1000.0f, 1.0f);
     };
+    cv::Mat p1_w_h = T_wc * cv::Mat(reorder_point(xyz1_cam));
+    cv::Mat p2_w_h = T_wc * cv::Mat(reorder_point(xyz2_cam));
+    cv::Mat p3_w_h = T_wc * cv::Mat(reorder_point(xyz3_cam));
+    cv::Point3f p1_w_m(p1_w_h.at<float>(0)/1000.0f,
+                       p1_w_h.at<float>(1)/1000.0f,
+                       p1_w_h.at<float>(2)/1000.0f);
+    cv::Point3f p2_w_m(p2_w_h.at<float>(0)/1000.0f,
+                       p2_w_h.at<float>(1)/1000.0f,
+                       p2_w_h.at<float>(2)/1000.0f);
+    cv::Point3f p3_w_m(p3_w_h.at<float>(0)/1000.0f,
+                       p3_w_h.at<float>(1)/1000.0f,
+                       p3_w_h.at<float>(2)/1000.0f);
 
-    cv::Vec4f p1_cam_re_mm = reorder_point(xyz1_cam);
-    cv::Vec4f p2_cam_re_mm = reorder_point(xyz2_cam);
-    cv::Vec4f p3_cam_re_mm = reorder_point(xyz3_cam);
-
-    cv::Mat p1_w_h = T_wc * cv::Mat(p1_cam_re_mm);
-    cv::Mat p2_w_h = T_wc * cv::Mat(p2_cam_re_mm);
-    cv::Mat p3_w_h = T_wc * cv::Mat(p3_cam_re_mm);
-
-    cv::Point3f p1_w_m(
-        p1_w_h.at<float>(0)/1000.0f,
-        p1_w_h.at<float>(1)/1000.0f,
-        p1_w_h.at<float>(2)/1000.0f
-    );
-    cv::Point3f p2_w_m(
-        p2_w_h.at<float>(0)/1000.0f,
-        p2_w_h.at<float>(1)/1000.0f,
-        p2_w_h.at<float>(2)/1000.0f
-    );
-    cv::Point3f p3_w_m(
-        p3_w_h.at<float>(0)/1000.0f,
-        p3_w_h.at<float>(1)/1000.0f,
-        p3_w_h.at<float>(2)/1000.0f
-    );
-
+    // ===== 6. 根据三个点计算箱子的宽和高 =====
     float width = 0.f, height = 0.f;
     if (!FusionGeometry::calcWidthHeightFrom3Points(p1_w_m, p2_w_m, p3_w_m, width, height)) {
         spdlog::warn("[#{}] 计算宽高失败", idx);
     }
 
+    // ===== 7. 构建局部坐标系（X:法向量, Y:边向量, Z:叉乘结果） =====
     auto norm_local = [](cv::Point3f v)->cv::Point3f{
         float L = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
         if (L < 1e-9f) return cv::Point3f(0,0,0);
@@ -282,23 +280,18 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
         return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
     };
 
-    cv::Point3f C_w_m(
-        t_wc_31.at<float>(0)/1000.0f,
-        t_wc_31.at<float>(1)/1000.0f,
-        t_wc_31.at<float>(2)/1000.0f
-    );
-    cv::Point3f CP(C_w_m.x - p_w_m.x, C_w_m.y - p_w_m.y, C_w_m.z - p_w_m.z);
-    if (dot_local(n_w, CP) > 0) n_w = { -n_w.x, -n_w.y, -n_w.z };
-
+    // 如果法向量 x 分量为负，就翻转它
+    if (n_w.x < 0) {n_w = { -n_w.x, -n_w.y, -n_w.z };}
     if (y_w.y < 0) y_w = { -y_w.x, -y_w.y, -y_w.z };
 
+    // 构建正交基 (Xw, Yw, Zw)
     cv::Point3f Xw = norm_local(n_w);
     cv::Point3f Yw = norm_local(cv::Point3f(
         y_w.x - dot_local(y_w, Xw)*Xw.x,
         y_w.y - dot_local(y_w, Xw)*Xw.y,
         y_w.z - dot_local(y_w, Xw)*Xw.z
     ));
-    if (Yw.x==0 && Yw.y==0 && Yw.z==0) {
+    if (Yw.x==0 && Yw.y==0 && Yw.z==0) { // 避免退化情况
         cv::Point3f ref(0,1,0);
         if (std::fabs(dot_local(ref, Xw)) > 0.95f) ref = {1,0,0};
         Yw = norm_local(cv::Point3f(
@@ -310,6 +303,7 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     cv::Point3f Zw = norm_local(cross_local(Xw, Yw));
     Yw = norm_local(cross_local(Zw, Xw));
 
+    // ===== 8. 姿态矩阵转欧拉角 (WPR) =====
     Eigen::Matrix3d Rw;
     Rw << Xw.x, Yw.x, Zw.x,
           Xw.y, Yw.y, Zw.y,
@@ -324,15 +318,16 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     double P = rad2deg(pitch);
     double R = rad2deg(yaw);
 
+    // ===== 9. 输出结果 =====
     out.id        = static_cast<int>(idx);
-    out.xyz_m     = p_w_m;
+    out.xyz_m     = p_w_m;                         // 物体中心点坐标（世界系，米）
     out.wpr_deg   = cv::Vec3f(static_cast<float>(W),
                               static_cast<float>(P),
-                              static_cast<float>(R));
+                              static_cast<float>(R)); // 姿态角 (WPR)
     out.width_m   = width;
     out.height_m  = height;
-    out.obb       = rrect;
-    out.bottomMidPx = midPx;
+    out.obb       = rrect;                         // 原始旋转矩形
+    out.bottomMidPx = midPx;                       // 底边中点像素
     out.p1_w_m    = p1_w_m;
     out.p2_w_m    = p2_w_m;
     out.p3_w_m    = p3_w_m;
@@ -452,6 +447,7 @@ bool BoxPosePipeline::solveOneBoxR_(
         if (L < 1e-9f) return cv::Point3f(0,0,0);
         return { v.x/L, v.y/L, v.z/L };
     };
+
     auto dot_local = [](const cv::Point3f& a, const cv::Point3f& b)->float{
         return a.x*b.x + a.y*b.y + a.z*b.z;
     };
@@ -459,15 +455,9 @@ bool BoxPosePipeline::solveOneBoxR_(
         return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
     };
 
-    // 修正法向
-    cv::Point3f C_w_m(
-        t_wc_31.at<float>(0)/1000.0f,
-        t_wc_31.at<float>(1)/1000.0f,
-        t_wc_31.at<float>(2)/1000.0f
-    );
-    cv::Point3f CP(C_w_m.x - p_w_m.x, C_w_m.y - p_w_m.y, C_w_m.z - p_w_m.z);
-    if (dot_local(n_w, CP) > 0) n_w = { -n_w.x, -n_w.y, -n_w.z };
 
+    // 如果法向量 x 分量为负，就翻转它
+    if (n_w.x < 0) {n_w = { -n_w.x, -n_w.y, -n_w.z };}
     if (y_w.y < 0) y_w = { -y_w.x, -y_w.y, -y_w.z };
 
     cv::Point3f Xw = norm_local(n_w);
