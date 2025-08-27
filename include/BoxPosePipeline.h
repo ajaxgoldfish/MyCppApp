@@ -19,6 +19,21 @@ struct BoxPoseResult {
     cv::Point3f p1_w_m{}, p2_w_m{}, p3_w_m{};
 };
 
+// ========================
+// Box 姿态结果（旋转矩阵版）
+// ========================
+struct BoxPoseRotationResult {
+    int id = -1;                     // 箱子编号
+    cv::Point3f xyz_m{};             // 世界坐标系下中心点 (米)
+    cv::Matx33f R;                   // 旋转矩阵 (世界系下的朝向)
+    float width_m = 0.f;             // 箱子宽度 (米)
+    float height_m = 0.f;            // 箱子高度 (米)
+    cv::RotatedRect obb;             // 原始2D OBB
+    cv::Point2f bottomMidPx{};       // 图像底边中点
+    cv::Point3f p1_w_m{}, p2_w_m{}, p3_w_m{}; // 三个基准点 (米)
+};
+
+
 class BoxPosePipeline {
 public:
     struct Options {
@@ -67,6 +82,13 @@ private:
                       const std::vector<Proj>& proj,
                       const open3d::geometry::PointCloud& pc_cam,
                       BoxPoseResult& out) const;
+
+    bool solveOneBoxR_(size_t idx,
+                       const std::pair<cv::RotatedRect, cv::Point2f>& rect_mid,
+                       const std::vector<Proj>& proj,
+                       const open3d::geometry::PointCloud& pc_cam,
+                       BoxPoseRotationResult& out) const;
+
     static void drawEightLinesCentered_(cv::Mat& vis, const cv::RotatedRect& rrect, int id,
                                         const cv::Point3f& p_w_m, const cv::Vec3f& wpr_deg,
                                         float width_m, float height_m);

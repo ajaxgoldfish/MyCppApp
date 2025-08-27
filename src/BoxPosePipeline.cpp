@@ -339,6 +339,177 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     return true;
 }
 
+bool BoxPosePipeline::solveOneBoxR_(
+    size_t idx,
+    const std::pair<cv::RotatedRect, cv::Point2f>& rect_mid,
+    const std::vector<Proj>& proj,
+    const open3d::geometry::PointCloud& pc_cam,
+    BoxPoseRotationResult& out) const
+{
+    const cv::RotatedRect& rrect = rect_mid.first;
+    const cv::Point2f&     midPx = rect_mid.second;
+
+    // ====== 收集点 ======
+    std::vector<Eigen::Vector3d> rect_points;
+    rect_points.reserve(4096);
+    for (const auto& pr : proj) {
+        if (inRotRectFast(rrect, pr.u, pr.v)) {
+            rect_points.push_back(pc_cam.points_[pr.pid]);
+        }
+    }
+    if (rect_points.size() < 30) {
+        spdlog::info("[#{}] 框内点过少，跳过 ({} 点)", idx, rect_points.size());
+        return false;
+    }
+
+    // ====== 底边两点 + 第三点 ======
+    cv::Point2f p0, p1, p3;
+    if (!FusionGeometry::bottomEdgeWithThirdPoint(rrect, p0, p1, p3)) {
+        spdlog::info("[#{}] 无法获得底边两点/第三点", idx);
+        return false;
+    }
+
+    Eigen::Vector3d ray1_cam = pix2dir(p0);
+    Eigen::Vector3d ray2_cam = pix2dir(p1);
+    Eigen::Vector3d ray3_cam = pix2dir(p3);
+
+    cv::Point3f xyz_cam;
+    cv::Vec3f   n_cam, line_cam;
+    cv::Point3f xyz1_cam, xyz2_cam, xyz3_cam;
+
+    if (!FusionGeometry::computeBottomLineMidInfo3(
+            rect_points,
+            ray1_cam, ray2_cam, ray3_cam,
+            xyz_cam, n_cam, line_cam,
+            xyz1_cam, xyz2_cam, xyz3_cam)) {
+        spdlog::info("[#{}] 平面/交点求解失败", idx);
+        return false;
+    }
+
+    // ====== 相机 -> 世界 ======
+    cv::Vec3f n_cam_re    = reorder_vec3f(n_cam);
+    cv::Vec3f line_cam_re = reorder_vec3f(line_cam);
+
+    cv::Vec4f p_cam_re_mm(
+        xyz_cam.z * 1000.0f,
+       -xyz_cam.x * 1000.0f,
+       -xyz_cam.y * 1000.0f,
+        1.0f
+    );
+
+    cv::Mat T_wc = T_wc_.clone();               // 4x4, CV_32F
+    cv::Mat R_wc_33 = T_wc(cv::Rect(0,0,3,3));  // 3x3
+    cv::Mat t_wc_31 = T_wc(cv::Rect(3,0,1,3));  // 3x1
+
+    cv::Mat n_w_cv    = R_wc_33 * cv::Mat(n_cam_re);
+    cv::Mat line_w_cv = R_wc_33 * cv::Mat(line_cam_re);
+    cv::Point3f n_w(n_w_cv.at<float>(0), n_w_cv.at<float>(1), n_w_cv.at<float>(2));
+    cv::Point3f y_w(line_w_cv.at<float>(0), line_w_cv.at<float>(1), line_w_cv.at<float>(2));
+
+    cv::Mat p_w_h = T_wc * cv::Mat(p_cam_re_mm);
+    cv::Point3f p_w_m(
+        p_w_h.at<float>(0)/1000.0f,
+        p_w_h.at<float>(1)/1000.0f,
+        p_w_h.at<float>(2)/1000.0f
+    );
+
+    auto reorder_point = [](const cv::Point3f& p)->cv::Vec4f {
+        return cv::Vec4f(p.z * 1000.0f, -p.x * 1000.0f, -p.y * 1000.0f, 1.0f);
+    };
+
+    cv::Vec4f p1_cam_re_mm = reorder_point(xyz1_cam);
+    cv::Vec4f p2_cam_re_mm = reorder_point(xyz2_cam);
+    cv::Vec4f p3_cam_re_mm = reorder_point(xyz3_cam);
+
+    cv::Mat p1_w_h = T_wc * cv::Mat(p1_cam_re_mm);
+    cv::Mat p2_w_h = T_wc * cv::Mat(p2_cam_re_mm);
+    cv::Mat p3_w_h = T_wc * cv::Mat(p3_cam_re_mm);
+
+    cv::Point3f p1_w_m(
+        p1_w_h.at<float>(0)/1000.0f,
+        p1_w_h.at<float>(1)/1000.0f,
+        p1_w_h.at<float>(2)/1000.0f
+    );
+    cv::Point3f p2_w_m(
+        p2_w_h.at<float>(0)/1000.0f,
+        p2_w_h.at<float>(1)/1000.0f,
+        p2_w_h.at<float>(2)/1000.0f
+    );
+    cv::Point3f p3_w_m(
+        p3_w_h.at<float>(0)/1000.0f,
+        p3_w_h.at<float>(1)/1000.0f,
+        p3_w_h.at<float>(2)/1000.0f
+    );
+
+    float width = 0.f, height = 0.f;
+    if (!FusionGeometry::calcWidthHeightFrom3Points(p1_w_m, p2_w_m, p3_w_m, width, height)) {
+        spdlog::warn("[#{}] 计算宽高失败", idx);
+    }
+
+    // ====== 构造正交基 ======
+    auto norm_local = [](cv::Point3f v)->cv::Point3f{
+        float L = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+        if (L < 1e-9f) return cv::Point3f(0,0,0);
+        return { v.x/L, v.y/L, v.z/L };
+    };
+    auto dot_local = [](const cv::Point3f& a, const cv::Point3f& b)->float{
+        return a.x*b.x + a.y*b.y + a.z*b.z;
+    };
+    auto cross_local = [](const cv::Point3f& a, const cv::Point3f& b)->cv::Point3f{
+        return { a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x };
+    };
+
+    // 修正法向
+    cv::Point3f C_w_m(
+        t_wc_31.at<float>(0)/1000.0f,
+        t_wc_31.at<float>(1)/1000.0f,
+        t_wc_31.at<float>(2)/1000.0f
+    );
+    cv::Point3f CP(C_w_m.x - p_w_m.x, C_w_m.y - p_w_m.y, C_w_m.z - p_w_m.z);
+    if (dot_local(n_w, CP) > 0) n_w = { -n_w.x, -n_w.y, -n_w.z };
+
+    if (y_w.y < 0) y_w = { -y_w.x, -y_w.y, -y_w.z };
+
+    cv::Point3f Xw = norm_local(n_w);
+    cv::Point3f Yw = norm_local(cv::Point3f(
+        y_w.x - dot_local(y_w, Xw)*Xw.x,
+        y_w.y - dot_local(y_w, Xw)*Xw.y,
+        y_w.z - dot_local(y_w, Xw)*Xw.z
+    ));
+    if (Yw.x==0 && Yw.y==0 && Yw.z==0) {
+        cv::Point3f ref(0,1,0);
+        if (std::fabs(dot_local(ref, Xw)) > 0.95f) ref = {1,0,0};
+        Yw = norm_local(cv::Point3f(
+            ref.x - dot_local(ref, Xw)*Xw.x,
+            ref.y - dot_local(ref, Xw)*Xw.y,
+            ref.z - dot_local(ref, Xw)*Xw.z
+        ));
+    }
+    cv::Point3f Zw = norm_local(cross_local(Xw, Yw));
+    Yw = norm_local(cross_local(Zw, Xw));
+
+    // ====== 旋转矩阵 ======
+    cv::Matx33f Rw_cv(
+        Xw.x, Yw.x, Zw.x,
+        Xw.y, Yw.y, Zw.y,
+        Xw.z, Yw.z, Zw.z
+    );
+
+    // ====== 输出 ======
+    out.id          = static_cast<int>(idx);
+    out.xyz_m       = p_w_m;
+    out.R           = Rw_cv;
+    out.width_m     = width;
+    out.height_m    = height;
+    out.obb         = rrect;
+    out.bottomMidPx = midPx;
+    out.p1_w_m      = p1_w_m;
+    out.p2_w_m      = p2_w_m;
+    out.p3_w_m      = p3_w_m;
+    return true;
+}
+
+
 void BoxPosePipeline::drawEightLinesCentered_(cv::Mat& vis,
                                               const cv::RotatedRect& rrect,
                                               int id,

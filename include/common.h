@@ -6,6 +6,7 @@
 #define YZX_VISION_COMMON_H
 
 struct Box {
+    int id;
     double x;
     double y;
     double z;
