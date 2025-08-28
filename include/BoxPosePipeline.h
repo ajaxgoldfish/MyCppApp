@@ -17,6 +17,7 @@ struct BoxPoseResult {
     cv::RotatedRect obb;
     cv::Point2f bottomMidPx{};
     cv::Point3f p1_w_m{}, p2_w_m{}, p3_w_m{};
+    Eigen::Matrix3d Rw;                 // 旋转矩阵 (世界系下的朝向)
 };
 
 // ========================

@@ -76,6 +76,14 @@ int main() {
             continue;
         }
 
+        // 输出结果到控制台
+        for (size_t i = 0; i < results.size(); ++i) {
+            std::ostringstream oss;
+            oss << results[i].Rw;   // Eigen::Matrix 支持 operator<< 到 ostream
+            spdlog::info("Rw = \n{}", oss.str());
+
+        }
+
         // ====== 5) 写结果到同目录 ======
         const fs::path outPath = caseDir / "vis_on_orig.jpg";
         if (!cv::imwrite(outPath.string(), vis)) {

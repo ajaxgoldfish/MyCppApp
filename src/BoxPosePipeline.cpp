@@ -304,7 +304,7 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     Yw = norm_local(cross_local(Zw, Xw));
 
     // ===== 8. 姿态矩阵转欧拉角 (WPR) =====
-    Eigen::Matrix3d Rw;
+    Eigen::Matrix3d Rw ;
     Rw << Xw.x, Yw.x, Zw.x,
           Xw.y, Yw.y, Zw.y,
           Xw.z, Yw.z, Zw.z;
@@ -331,6 +331,7 @@ bool BoxPosePipeline::solveOneBox_(size_t idx,
     out.p1_w_m    = p1_w_m;
     out.p2_w_m    = p2_w_m;
     out.p3_w_m    = p3_w_m;
+    out.Rw        = Rw;
     return true;
 }
 

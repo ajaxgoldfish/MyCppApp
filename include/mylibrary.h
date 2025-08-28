@@ -33,6 +33,15 @@ namespace zzb {
         double angle_a;
         double angle_b;
         double angle_c;
+        float rw1;
+        float rw2;
+        float rw3;
+        float rw4;
+        float rw5;
+        float rw6;
+        float rw7;
+        float rw8;
+        float rw9;
     };
 }
 extern "C" {
