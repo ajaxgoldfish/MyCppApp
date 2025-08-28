@@ -60,6 +60,18 @@ namespace {
         dst.angle_a = static_cast<double>(src.wpr_deg[0]);
         dst.angle_b = static_cast<double>(src.wpr_deg[1]);
         dst.angle_c = static_cast<double>(src.wpr_deg[2]);
+
+        // 旋转矩阵（行优先展开为 r1..r9）
+        const Eigen::Matrix3d& R = src.Rw;
+        dst.rw1 = static_cast<double>(R(0,0));
+        dst.rw2 = static_cast<double>(R(0,1));
+        dst.rw3 = static_cast<double>(R(0,2));
+        dst.rw4 = static_cast<double>(R(1,0));
+        dst.rw5 = static_cast<double>(R(1,1));
+        dst.rw6 = static_cast<double>(R(1,2));
+        dst.rw7 = static_cast<double>(R(2,0));
+        dst.rw8 = static_cast<double>(R(2,1));
+        dst.rw9 = static_cast<double>(R(2,2));
     }
 } // namespace
 
@@ -185,7 +197,10 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         arr.push_back({
             {"x", b.x}, {"y", b.y}, {"z", b.z},
             {"width", b.width}, {"height", b.height},
-            {"angle_a", b.angle_a}, {"angle_b", b.angle_b}, {"angle_c", b.angle_c}
+            {"angle_a", b.angle_a}, {"angle_b", b.angle_b}, {"angle_c", b.angle_c},
+            {"rw1", b.rw1}, {"rw2", b.rw2}, {"rw3", b.rw3},
+            {"rw4", b.rw4}, {"rw5", b.rw5}, {"rw6", b.rw6},
+            {"rw7", b.rw7}, {"rw8", b.rw8}, {"rw9", b.rw9}
         });
     }
     const fs::path jsonPath = caseDir / "boxes.json";
