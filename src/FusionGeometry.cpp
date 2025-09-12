@@ -56,12 +56,6 @@ bool FusionGeometry::bottomMidpointCircle(const cv::RotatedRect& rect,
     if (radius < 2) radius = 2;
     return true;
 }
-// 点是否在旋转矩形内
-static inline bool inRotRect(const cv::RotatedRect& rr, int u, int v) {
-    cv::Point2f pts[4]; rr.points(pts);
-    std::vector<cv::Point2f> poly(pts, pts + 4);
-    return cv::pointPolygonTest(poly, cv::Point2f((float)u, (float)v), false) >= 0;
-}
 
 bool FusionGeometry::computePoseAtBottomMid(
         const std::vector<Eigen::Vector3d>& rect_points,
