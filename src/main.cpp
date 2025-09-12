@@ -2,7 +2,8 @@
 #include <filesystem>
 #include <chrono>
 #include <spdlog/spdlog.h>
-// 如果需要输出到文件，可额外引入：#include <spdlog/sinks/basic_file_sink.h>
+#include <nlohmann/json.hpp>
+
 #include "BoxPosePipeline.h"
 
 namespace fs = std::filesystem;
@@ -76,12 +77,38 @@ int main() {
             continue;
         }
 
-        // 输出结果到控制台
-        for (size_t i = 0; i < results.size(); ++i) {
-            std::ostringstream oss;
-            oss << results[i].Rw;   // Eigen::Matrix 支持 operator<< 到 ostream
-            spdlog::info("Rw = \n{}", oss.str());
+        // 6) 写入 JSON（增加原始数据文件路径）
+        nlohmann::json j;
 
+        auto& arr = j["boxes"] = nlohmann::json::array();
+        for (const auto& b : results) {
+            const Eigen::Matrix3d& R = b.Rw; // 世界系旋转矩阵
+
+            arr.push_back({
+                {"id", b.id},
+                {"x", static_cast<double>(b.xyz_m.x)},
+                {"y", static_cast<double>(b.xyz_m.y)},
+                {"z", static_cast<double>(b.xyz_m.z)},
+                {"width",  static_cast<double>(b.width_m)},
+                {"height", static_cast<double>(b.height_m)},
+                {"angle_a", static_cast<double>(b.wpr_deg[0])}, // W
+                {"angle_b", static_cast<double>(b.wpr_deg[1])}, // P
+                {"angle_c", static_cast<double>(b.wpr_deg[2])}, // R
+                // Rw 按“行优先”铺平
+                {"rw1", R(0,0)}, {"rw2", R(0,1)}, {"rw3", R(0,2)},
+                {"rw4", R(1,0)}, {"rw5", R(1,1)}, {"rw6", R(1,2)},
+                {"rw7", R(2,0)}, {"rw8", R(2,1)}, {"rw9", R(2,2)}
+            });
+        }
+
+        const fs::path jsonPath = caseDir / "boxes.json";
+        std::ofstream ofs(jsonPath);
+        if (!ofs) {
+            spdlog::error("写 JSON 失败（无法打开文件）: {}", jsonPath.string());
+        } else {
+            ofs << std::setw(2) << j;
+            ofs.close();
+            spdlog::info("JSON 已写入: {}", jsonPath.string());
         }
 
         // ====== 5) 写结果到同目录 ======
@@ -91,6 +118,8 @@ int main() {
             ++err_cnt;
             continue;
         }
+
+
 
         auto t1 = std::chrono::steady_clock::now();  // ⏱ 结束计时
         double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

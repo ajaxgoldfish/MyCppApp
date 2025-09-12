@@ -15,15 +15,8 @@ MaskRCNNRunner::MaskRCNNRunner(const std::string& model_path)
     Ort::SessionOptions so;
     so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-    // ====== 关键：附加 CUDA Execution Provider（GPU）======
-    // 最精简、通用的写法：只指定 device_id（多卡时改成你想用的编号）
-    // 需要链接 onnxruntime_providers_cuda
     Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(so, /*device_id=*/0));
 
-    // （可选）关掉 CPU 线程池对 GPU 场景的干扰
-    // so.DisablePerSessionThreads();
-
-    // ====== 创建 Session（同原来）======
     session_ = std::make_unique<Ort::Session>(env_, to_wstring(model_path).c_str(), so);
 
     Ort::AllocatorWithDefaultOptions alloc;
