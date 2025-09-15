@@ -48,7 +48,7 @@ target_link_libraries(MyCppApp PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxrun
 
 # 生成动态库
 add_library(yzx_vision_zzb SHARED
-        src/mylibrary.cpp
+        src/gpu_library.cpp
         src/LanxinCamera.cpp
         src/FusionGeometry.cpp)
 

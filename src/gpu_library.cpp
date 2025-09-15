@@ -2,7 +2,7 @@
 #define NOMINMAX
 #endif
 
-#include "mylibrary.h"
+#include "gpu_library.h"
 #include <onnxruntime_cxx_api.h>
 #include <Eigen/Dense>
 #include <array>
