@@ -16,10 +16,7 @@ find_package(Open3D CONFIG REQUIRED)
 
 # MyCppApp
 add_executable(MyCppApp src/main.cpp
-                        src/LanxinCamera.cpp
-                        src/MaskRCNNRunner.cpp
-                        src/FusionGeometry.cpp
-                        src/BoxPosePipeline.cpp
+        src/cpu_library.cpp
 )
 
 
