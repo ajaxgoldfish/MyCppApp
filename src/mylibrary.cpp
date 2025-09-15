@@ -4,13 +4,14 @@
 #endif
 
 #include "mylibrary.h"          // 声明：bs_yzx_init / bs_yzx_object_detection_lanxin
-#include "MaskRCNNRunner.h"
 #include "FusionGeometry.h"
 #include <onnxruntime_cxx_api.h>
 #include <Eigen/Dense>
 #include <array>
 #include <iomanip>
 #include <cmath>
+#include <opencv2/dnn.hpp>
+#include <algorithm>
 using nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -43,15 +44,23 @@ namespace {
 
     // ====== 全局状态（仅本编译单元）======
     std::unique_ptr<LanxinCamera>    g_camera;
-    std::unique_ptr<MaskRCNNRunner>  g_runner;
+    // 直接在本文件实现推理与绘制逻辑，不再依赖 MaskRCNNRunner 类
+    struct RunnerState {
+        Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "mrcnn"};
+        std::unique_ptr<Ort::Session> session;
+        std::string in_name;
+        std::vector<std::string> out_names_s;
+        std::vector<const char*> out_names;
+    };
+    std::unique_ptr<RunnerState>     g_runner;
     cv::Mat                          g_K, g_Kinv, g_Twc; // K: CV_64F, Twc: CV_32F
     LocalOptions                     g_opt;
     bool                             g_ready = false;
     std::string                      g_root_dir = "res"; // 仅用于输出可视化
 
     // 小工具
-    static inline cv::Vec3f reorder_vec3f(const cv::Vec3f& v) { return { v[2], -v[0], -v[1] }; }
-    static inline bool inRotRectFast(const cv::RotatedRect& rr, int u, int v) {
+    inline cv::Vec3f reorder_vec3f(const cv::Vec3f& v) { return { v[2], -v[0], -v[1] }; }
+    inline bool inRotRectFast(const cv::RotatedRect& rr, int u, int v) {
         const float cx = rr.center.x, cy = rr.center.y;
         const float hw = rr.size.width * 0.5f, hh = rr.size.height * 0.5f;
         const float ang = rr.angle * (float)CV_PI / 180.f;
@@ -61,12 +70,12 @@ namespace {
         const float y  = -dx*sa + dy*ca;
         return std::fabs(x) <= hw && std::fabs(y) <= hh;
     }
-    static inline void drawRotRect(cv::Mat& img, const cv::RotatedRect& rr,
+    inline void drawRotRect(cv::Mat& img, const cv::RotatedRect& rr,
                                    const cv::Scalar& color, int thickness=2) {
         cv::Point2f pts[4]; rr.points(pts);
         for (int i=0;i<4;++i) cv::line(img, pts[i], pts[(i+1)%4], color, thickness, cv::LINE_AA);
     }
-    static inline Eigen::Vector3d pix2dir(const cv::Point2f& px) {
+    inline Eigen::Vector3d pix2dir(const cv::Point2f& px) {
         cv::Vec3d hv(
             g_Kinv.at<double>(0,0)*px.x + g_Kinv.at<double>(0,1)*px.y + g_Kinv.at<double>(0,2),
             g_Kinv.at<double>(1,0)*px.x + g_Kinv.at<double>(1,1)*px.y + g_Kinv.at<double>(1,2),
@@ -79,22 +88,22 @@ namespace {
     struct Proj { int u, v, pid; };
 
     // 前向声明：本地 Pipeline 函数
-    static bool inferMasks_(const cv::Mat& rgb, cv::Mat& vis, std::vector<cv::Mat1b>& masks);
-    static void collectRectsAndBottomMids_(const std::vector<cv::Mat1b>& masks,
-                                           std::vector<std::pair<cv::RotatedRect, cv::Point2f>>& rect_and_mid);
-    static void projectPointCloud_(const open3d::geometry::PointCloud& pc_cam, int W, int H, std::vector<Proj>& proj);
-    static bool solveOneBox_(size_t idx,
-                             const std::pair<cv::RotatedRect, cv::Point2f>& rect_mid,
-                             const std::vector<Proj>& proj,
-                             const open3d::geometry::PointCloud& pc_cam,
-                             LocalBoxPoseResult& out);
-    static void drawEightLinesCentered_(cv::Mat& vis, const cv::RotatedRect& rrect, int id,
-                                        const cv::Point3f& p_w_m, const cv::Vec3f& wpr_deg,
-                                        float width_m, float height_m);
-    static bool pipeline_run(const cv::Mat& rgb,
-                             const open3d::geometry::PointCloud& pc_cam,
-                             std::vector<LocalBoxPoseResult>& results,
-                             cv::Mat* vis_out);
+    bool inferMasks_(const cv::Mat& rgb, cv::Mat& vis, std::vector<cv::Mat1b>& masks);
+    void collectRectsAndBottomMids_(const std::vector<cv::Mat1b>& masks,
+                                    std::vector<std::pair<cv::RotatedRect, cv::Point2f>>& rect_and_mid);
+    void projectPointCloud_(const open3d::geometry::PointCloud& pc_cam, int W, int H, std::vector<Proj>& proj);
+    bool solveOneBox_(size_t idx,
+                      const std::pair<cv::RotatedRect, cv::Point2f>& rect_mid,
+                      const std::vector<Proj>& proj,
+                      const open3d::geometry::PointCloud& pc_cam,
+                      LocalBoxPoseResult& out);
+    void drawEightLinesCentered_(cv::Mat& vis, const cv::RotatedRect& rrect, int id,
+                                 const cv::Point3f& p_w_m, const cv::Vec3f& wpr_deg,
+                                 float width_m, float height_m);
+    bool pipeline_run(const cv::Mat& rgb,
+                      const open3d::geometry::PointCloud& pc_cam,
+                      std::vector<LocalBoxPoseResult>& results,
+                      cv::Mat* vis_out);
 
     // 将一次 pipeline 结果写入 Box（按你给的字段）
     static inline void write_one_box(::zzb::Box& dst, const LocalBoxPoseResult& src) {
@@ -127,19 +136,109 @@ namespace {
     // ====== 本地 Pipeline 具体实现 ======
     
 
-    static bool inferMasks_(const cv::Mat& rgb, cv::Mat& vis, std::vector<cv::Mat1b>& masks) {
+    // ===== 本地推理与后处理（取代 MaskRCNNRunner） =====
+    std::wstring to_wstring_local(const std::string& s) { return { s.begin(), s.end() }; }
+    inline void pixel_normalize_mmdet_rgb_local(cv::Mat& rgb_f32) {
+        static const cv::Scalar mean(123.675, 116.28, 103.53);
+        static const cv::Scalar stdv(58.395, 57.12, 57.375);
+        cv::subtract(rgb_f32, mean, rgb_f32);
+        cv::divide(rgb_f32, stdv, rgb_f32);
+    }
+    std::vector<Ort::Value> infer_raw_local(const cv::Mat& orig) {
+        if (orig.empty()) throw std::runtime_error("输入图像为空");
+        cv::Mat rgb; cv::cvtColor(orig, rgb, cv::COLOR_BGR2RGB);
+        rgb.convertTo(rgb, CV_32F);
+        pixel_normalize_mmdet_rgb_local(rgb);
+        cv::Mat blob; cv::dnn::blobFromImage(rgb, blob, 1.0, cv::Size(), {}, false, false, CV_32F);
+        std::vector<int64_t> ishape = {1, 3, blob.size[2], blob.size[3]};
+        Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::Value input = Ort::Value::CreateTensor<float>(
+            mi, reinterpret_cast<float*>(blob.data), static_cast<size_t>(blob.total()), ishape.data(), ishape.size());
+        const char* in_names[] = { g_runner->in_name.c_str() };
+        auto outs = g_runner->session->Run(Ort::RunOptions{nullptr}, in_names, &input, 1,
+                                           g_runner->out_names.data(), g_runner->out_names.size());
+        for (size_t idx = 0; idx < outs.size(); ++idx) {
+            auto shape = outs[idx].GetTensorTypeAndShapeInfo().GetShape();
+            std::ostringstream oss; oss << "outs[" << idx << "] shape = [";
+            for (size_t j = 0; j < shape.size(); ++j) { oss << shape[j]; if (j + 1 < shape.size()) oss << ", "; }
+            oss << "]"; spdlog::info("{}", oss.str());
+        }
+        return outs;
+    }
+    cv::Mat paint_local(const cv::Mat& orig, const std::vector<Ort::Value>& outs,
+                        float score_thr, float mask_thr) {
+        if (orig.empty()) throw std::runtime_error("输入图像为空");
+        if (outs.size() < 3) throw std::runtime_error("输出不足，期望3个");
+        const cv::Scalar color(0, 255, 0); const double alpha = 0.5;
+        auto sh0 = outs[0].GetTensorTypeAndShapeInfo().GetShape();
+        auto sh2 = outs[2].GetTensorTypeAndShapeInfo().GetShape();
+        int64_t N = sh0[1]; int mH = (int)sh2[2]; int mW = (int)sh2[3];
+        const float* dets = outs[0].GetTensorData<float>();
+        const float* masks = outs[2].GetTensorData<float>();
+        cv::Mat vis = orig.clone(); int kept = 0;
+        for (int64_t i = 0; i < N; ++i) {
+            const float* r = dets + i * 5; float sc = r[4]; if (sc < score_thr) continue;
+            int x1 = std::lround(r[0]), y1 = std::lround(r[1]);
+            int x2 = std::lround(r[2]), y2 = std::lround(r[3]);
+            x1 = std::clamp(x1, 0, vis.cols - 1); y1 = std::clamp(y1, 0, vis.rows - 1);
+            x2 = std::clamp(x2, 0, vis.cols - 1); y2 = std::clamp(y2, 0, vis.rows - 1);
+            cv::rectangle(vis, cv::Rect(cv::Point(x1, y1), cv::Point(x2, y2)), color, 2);
+            char buf[32]; std::snprintf(buf, sizeof(buf), "%.2f", sc);
+            cv::putText(vis, buf, { x1, std::max(0, y1 - 5) }, cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 1);
+            int ow = std::max(1, x2 - x1), oh = std::max(1, y2 - y1);
+            cv::Rect roi(x1, y1, ow, oh); roi &= cv::Rect(0, 0, vis.cols, vis.rows); if (roi.area() <= 0) continue;
+            const float* mptr = masks + i * (mH * mW);
+            cv::Mat mask_f32(mH, mW, CV_32F, const_cast<float*>(mptr));
+            cv::Mat mask_up; cv::resize(mask_f32, mask_up, roi.size(), 0, 0, cv::INTER_LINEAR);
+            cv::Mat1b mask8; cv::compare(mask_up, mask_thr, mask8, cv::CMP_GT);
+            cv::Mat roi_img = vis(roi); cv::Mat overlay = roi_img.clone(); overlay.setTo(color, mask8);
+            cv::addWeighted(roi_img, 1.0, overlay, 0.5, 0, roi_img);
+            ++kept;
+        }
+        spdlog::info("绘制 {} 个实例", kept);
+        return vis;
+    }
+    std::vector<cv::Mat1b> infer_masks_local(const cv::Mat& orig, const std::vector<Ort::Value>& outs,
+                                             float score_thr, float mask_thr) {
+        if (orig.empty()) throw std::runtime_error("输入图像为空");
+        if (outs.size() < 3) throw std::runtime_error("输出不足，期望3个");
+        auto sh0 = outs[0].GetTensorTypeAndShapeInfo().GetShape();
+        auto sh2 = outs[2].GetTensorTypeAndShapeInfo().GetShape();
+        int64_t N = sh0[1]; int mH = (int)sh2[2]; int mW = (int)sh2[3];
+        const float* dets = outs[0].GetTensorData<float>();
+        const float* masks = outs[2].GetTensorData<float>();
+        std::vector<cv::Mat1b> result; result.reserve((size_t)N);
+        for (int64_t i = 0; i < N; ++i) {
+            const float* r = dets + i * 5; float sc = r[4]; if (sc < score_thr) continue;
+            int x1 = std::lround(r[0]), y1 = std::lround(r[1]);
+            int x2 = std::lround(r[2]), y2 = std::lround(r[3]);
+            x1 = std::clamp(x1, 0, orig.cols - 1); y1 = std::clamp(y1, 0, orig.rows - 1);
+            x2 = std::clamp(x2, 0, orig.cols - 1); y2 = std::clamp(y2, 0, orig.rows - 1);
+            int ow = std::max(1, x2 - x1), oh = std::max(1, y2 - y1);
+            cv::Rect roi(x1, y1, ow, oh); roi &= cv::Rect(0, 0, orig.cols, orig.rows); if (roi.area() <= 0) continue;
+            const float* mptr = masks + i * (mH * mW);
+            cv::Mat mask_f32(mH, mW, CV_32F, const_cast<float*>(mptr));
+            cv::Mat mask_up; cv::resize(mask_f32, mask_up, roi.size(), 0, 0, cv::INTER_LINEAR);
+            cv::Mat1b mask8; cv::compare(mask_up, mask_thr, mask8, cv::CMP_GT);
+            cv::Mat1b fullMask(orig.rows, orig.cols, (uchar)0); fullMask(roi).setTo(255, mask8);
+            result.emplace_back(std::move(fullMask));
+        }
+        spdlog::info("共导出 {} 个实例掩膜", result.size());
+        return result;
+    }
+    bool inferMasks_(const cv::Mat& rgb, cv::Mat& vis, std::vector<cv::Mat1b>& masks) {
         auto t0 = std::chrono::steady_clock::now();
-        std::vector<Ort::Value> outs = g_runner->inferRaw(rgb);
+        std::vector<Ort::Value> outs = infer_raw_local(rgb);
         auto t1 = std::chrono::steady_clock::now();
         double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         spdlog::info("paint:{}", elapsed_ms);
-        vis = g_runner->paint(rgb, outs, g_opt.score_thr, g_opt.mask_thr);
+        vis = paint_local(rgb, outs, g_opt.score_thr, g_opt.mask_thr);
         if (vis.empty()) vis = rgb.clone();
-        masks = g_runner->inferMasks(rgb, outs, g_opt.score_thr, g_opt.mask_thr);
+        masks = infer_masks_local(rgb, outs, g_opt.score_thr, g_opt.mask_thr);
         return true;
     }
 
-    static void collectRectsAndBottomMids_(
+    void collectRectsAndBottomMids_(
         const std::vector<cv::Mat1b>& masks,
         std::vector<std::pair<cv::RotatedRect, cv::Point2f>>& rect_and_mid) {
         rect_and_mid.clear();
@@ -156,7 +255,7 @@ namespace {
         }
     }
 
-    static void projectPointCloud_(const open3d::geometry::PointCloud& pc_cam, int W, int H, std::vector<Proj>& proj) {
+    void projectPointCloud_(const open3d::geometry::PointCloud& pc_cam, int W, int H, std::vector<Proj>& proj) {
         const double fx = g_K.at<double>(0,0), fy = g_K.at<double>(1,1);
         const double cx = g_K.at<double>(0,2), cy = g_K.at<double>(1,2);
         proj.clear();
@@ -171,7 +270,7 @@ namespace {
         }
     }
 
-    static bool solveOneBox_(size_t idx,
+    bool solveOneBox_(size_t idx,
                              const std::pair<cv::RotatedRect, cv::Point2f>& rect_mid,
                              const std::vector<Proj>& proj,
                              const open3d::geometry::PointCloud& pc_cam,
@@ -320,7 +419,7 @@ namespace {
         return true;
     }
 
-    static void drawEightLinesCentered_(cv::Mat& vis,
+    void drawEightLinesCentered_(cv::Mat& vis,
                                         const cv::RotatedRect& rrect,
                                         int id,
                                         const cv::Point3f& p_w_m,
@@ -367,7 +466,7 @@ namespace {
         }
     }
 
-    static bool pipeline_run(const cv::Mat& rgb,
+    bool pipeline_run(const cv::Mat& rgb,
                              const open3d::geometry::PointCloud& pc_cam,
                              std::vector<LocalBoxPoseResult>& results,
                              cv::Mat* vis_out) {
@@ -448,7 +547,18 @@ int bs_yzx_init(const bool isDebug) {
             g_Twc  = FusionGeometry::getExtrinsic().clone(); // 4x4
             if (g_Twc.type() != CV_32F) g_Twc.convertTo(g_Twc, CV_32F);
 
-            g_runner = std::make_unique<MaskRCNNRunner>(g_opt.model_path);
+            // 创建本地 ORT Session
+            g_runner = std::make_unique<RunnerState>();
+            Ort::SessionOptions so; so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            g_runner->session = std::make_unique<Ort::Session>(g_runner->env, to_wstring_local(g_opt.model_path).c_str(), so);
+            Ort::AllocatorWithDefaultOptions alloc;
+            g_runner->in_name = g_runner->session->GetInputNameAllocated(0, alloc).get();
+            size_t out_count = g_runner->session->GetOutputCount();
+            g_runner->out_names_s.reserve(out_count);
+            for (size_t i = 0; i < out_count; ++i) {
+                g_runner->out_names_s.emplace_back(g_runner->session->GetOutputNameAllocated(i, alloc).get());
+            }
+            for (auto& s : g_runner->out_names_s) g_runner->out_names.push_back(s.c_str());
             g_ready = true;
         } catch (const std::exception& e) {
             spdlog::critical("Pipeline 初始化失败: {}", e.what());
