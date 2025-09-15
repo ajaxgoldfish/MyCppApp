@@ -76,14 +76,12 @@ int bs_yzx_init(const bool isDebug) {
     // 初始化 pipeline（本地实现，内联）
     if (!g_ready) {
         try {
-            // 展开 initIntrinsic_local
             cv::FileStorage fs_intrinsic(g_calib_path, cv::FileStorage::READ);
             if (!fs_intrinsic.isOpened()) return -25;
             fs_intrinsic["intrinsicRGB"] >> g_intrinsic;
             if (g_intrinsic.empty() || g_intrinsic.rows!=3 || g_intrinsic.cols!=3) return -26;
             if (g_intrinsic.type() != CV_64F) g_intrinsic.convertTo(g_intrinsic, CV_64F);
             
-            // 展开 initExtrinsic_local  
             cv::FileStorage fs_extrinsic(g_calib_path, cv::FileStorage::READ);
             if (!fs_extrinsic.isOpened()) {
                 spdlog::error("[initExtrinsic] Cannot open extrinsic file: {}", g_calib_path);
@@ -332,7 +330,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     for (const auto &m: masks) {
         if (m.empty()) continue;
         cv::RotatedRect obb;
-        // 展开 maskToObb_local
         obb = cv::RotatedRect();
         if (!m.empty()) {
             // 1) 做一个"非零即前景"的二值图（不做阈值筛选、不做形态学）
@@ -353,7 +350,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
             if (!pts.empty()) {
                 obb = cv::minAreaRect(pts);           // angle ∈ (-90, 0]
                 
-                // 展开 bottomMidpointCircle_local
                 if (obb.size.width > 0 && obb.size.height > 0) {
                     cv::Point2f pts_obb[4]; 
                     obb.points(pts_obb);
@@ -421,7 +417,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
             spdlog::info("[#{}] Too few points in box, skipping ({} points)", i, rect_points.size());
         } else {
             cv::Point2f p0, p1, p3;
-            // 展开 bottomEdgeWithThirdPoint_local
             bool bottomEdgeFound = false;
             if (rrect.size.width > 0 && rrect.size.height > 0) {
                 cv::Point2f pts_edge[4];
@@ -488,7 +483,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
                 cv::Point3f xyz_cam;
                 cv::Vec3f n_cam, line_cam;
                 cv::Point3f xyz1_cam, xyz2_cam, xyz3_cam;
-                // 展开 computeBottomLineMidInfo3_local
                 bool planeComputed = false;
                 if (rect_points.size() >= 30) {
                     // 1) 用 RANSAC 拟合平面（相机系）
@@ -618,8 +612,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
                                        p3_w_h.at<float>(2) / 1000.0f);
 
                     float width = 0.f, height = 0.f;
-                    // 展开 calcWidthHeightFrom3Points_local
-                    // 以 p1 为公共顶点
+
                     const cv::Point3f v12 = p2_w_m - p1_w_m; // 宽方向向量
                     const cv::Point3f v13 = p3_w_m - p1_w_m; // 高方向向量
 
@@ -777,7 +770,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         dst.angle_b = static_cast<double>(src.wpr_deg[1]);
         dst.angle_c = static_cast<double>(src.wpr_deg[2]);
 
-        // 旋转矩阵（行优先展开为 r1..r9）
         const Eigen::Matrix3d &R = src.Rw;
         dst.rw1 = static_cast<double>(R(0, 0));
         dst.rw2 = static_cast<double>(R(0, 1));

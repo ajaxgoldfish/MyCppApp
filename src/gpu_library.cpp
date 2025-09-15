@@ -440,7 +440,8 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         }
         if (rect_points.size() < 30) {
             spdlog::info("[#{}] Too few points in box, skipping ({} points)", i, rect_points.size());
-        } else {
+        }
+        else {
             cv::Point2f p0, p1, p3;
             // 展开 bottomEdgeWithThirdPoint_local
             bool bottomEdgeFound = false;
