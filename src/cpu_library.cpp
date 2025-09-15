@@ -116,14 +116,18 @@ int bs_yzx_init(const bool isDebug) {
             g_Twc = g_T_world_cam.clone(); // 4x4
             if (g_Twc.type() != CV_32F) g_Twc.convertTo(g_Twc, CV_32F);
 
-            // 创建本地 ORT Session
+            // 创建本地 ORT Session (CPU版本)
             g_runner = std::make_unique<RunnerState>();
             Ort::SessionOptions so;
             so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-            std::wstring model_path_wide(g_model_path.begin(), g_model_path.end());
+            
+            // CPU版本：不设置CUDA执行提供程序，使用默认CPU提供程序
+            auto to_wstring = [](const std::string& s) -> std::wstring {
+                return { s.begin(), s.end() };
+            };
+            
             g_runner->session = std::make_unique<Ort::Session>(g_runner->env,
-                                                               model_path_wide.c_str(), so);
+                                                               to_wstring(g_model_path).c_str(), so);
             Ort::AllocatorWithDefaultOptions alloc;
             g_runner->in_name = g_runner->session->GetInputNameAllocated(0, alloc).get();
             size_t out_count = g_runner->session->GetOutputCount();

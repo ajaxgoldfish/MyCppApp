@@ -47,28 +47,26 @@ target_link_libraries(MyCppApp PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxrun
 
 
 # 生成动态库
-add_library(yzx_vision_zzb SHARED
+add_library(yzx_vision_zzb_gpu SHARED
         src/gpu_library.cpp
-        src/LanxinCamera.cpp
-        src/FusionGeometry.cpp)
+        src/LanxinCamera.cpp)
 
-target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lanxin/include)
-target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/third_party/onnxruntime-gpu/include)
-target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/include)
+target_include_directories(yzx_vision_zzb_gpu PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(yzx_vision_zzb_gpu PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lanxin/include)
+target_include_directories(yzx_vision_zzb_gpu PRIVATE ${CMAKE_SOURCE_DIR}/third_party/onnxruntime-gpu/include)
+target_include_directories(yzx_vision_zzb_gpu PRIVATE ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/include)
 
 
-target_link_libraries(yzx_vision_zzb PRIVATE ${OpenCV_LIBS})
-target_link_libraries(yzx_vision_zzb PRIVATE spdlog::spdlog)
-target_link_libraries(yzx_vision_zzb PRIVATE ${PCL_LIBRARIES})
-target_link_libraries(yzx_vision_zzb PRIVATE Open3D::Open3D)
-target_link_libraries(yzx_vision_zzb PRIVATE ${PROJECT_SOURCE_DIR}/third_party/lanxin/lib/win_x64/LxCameraApi.lib)
-target_link_libraries(yzx_vision_zzb PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avcodec.lib
+target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${OpenCV_LIBS})
+target_link_libraries(yzx_vision_zzb_gpu PRIVATE spdlog::spdlog)
+target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${PCL_LIBRARIES})
+target_link_libraries(yzx_vision_zzb_gpu PRIVATE Open3D::Open3D)
+target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${PROJECT_SOURCE_DIR}/third_party/lanxin/lib/win_x64/LxCameraApi.lib)
+target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avcodec.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avdevice.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avfilter.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avformat.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avutil.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swresample.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swscale.lib)
-target_link_libraries(yzx_vision_zzb PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-gpu/lib/onnxruntime.lib)
-
+target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-gpu/lib/onnxruntime.lib)
