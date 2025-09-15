@@ -87,7 +87,7 @@ int bs_yzx_init(const bool isDebug) {
             // 展开 initExtrinsic_local  
             cv::FileStorage fs_extrinsic(g_calib_path, cv::FileStorage::READ);
             if (!fs_extrinsic.isOpened()) {
-                spdlog::error("[initExtrinsic] 打不开外参文件: {}", g_calib_path);
+                spdlog::error("[initExtrinsic] Cannot open extrinsic file: {}", g_calib_path);
                 return -27;
             }
             
@@ -95,12 +95,12 @@ int bs_yzx_init(const bool isDebug) {
             fs_extrinsic.release();
             
             if (g_T_world_cam.empty()) {
-                spdlog::error("[initExtrinsic] extrinsicRGB 节点不存在或为空");
+                spdlog::error("[initExtrinsic] extrinsicRGB node not found or empty");
                 return -28;
             }
             
             if (g_T_world_cam.rows != 4 || g_T_world_cam.cols != 4) {
-                spdlog::error("[initExtrinsic] extrinsicRGB 必须是 4x4 矩阵");
+                spdlog::error("[initExtrinsic] extrinsicRGB must be 4x4 matrix");
                 return -29;
             }
             
@@ -135,7 +135,7 @@ int bs_yzx_init(const bool isDebug) {
             for (auto &s: g_out_names_s) g_out_names.push_back(s.c_str());
             g_ready = true;
         } catch (const std::exception &e) {
-            spdlog::critical("Pipeline 初始化失败: {}", e.what());
+            spdlog::critical("Pipeline initialization failed: {}", e.what());
             g_ready = false;
             return -1;
         }
@@ -145,14 +145,14 @@ int bs_yzx_init(const bool isDebug) {
     if (!g_camera || !g_camera->isOpened()) {
         g_camera = std::make_unique<LanxinCamera>(); // 构造里会 connect()
         if (!g_camera->isOpened()) {
-            spdlog::critical("LanxinCamera 连接失败");
+            spdlog::critical("LanxinCamera connection failed");
             g_camera.reset();
             return -2;
         }
-        spdlog::info("LanxinCamera 已连接");
+        spdlog::info("LanxinCamera connected");
     }
 
-    spdlog::info("bs_yzx_init 完成（debug={}）", isDebug);
+    spdlog::info("bs_yzx_init completed (debug={})", isDebug);
     return 0;
 }
 
@@ -170,22 +170,22 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     // 1) 从相机抓图像
     cv::Mat rgb;
     if (g_camera->CapFrame(rgb) != 0 || rgb.empty()) {
-        spdlog::error("相机获取 RGB 帧失败");
+        spdlog::error("Failed to capture RGB frame");
         return -22;
     }
 
     // 1.1 保存原始 RGB
     const fs::path rgbPath = caseDir / "rgb_orig.jpg";
     if (!cv::imwrite(rgbPath.string(), rgb)) {
-        spdlog::warn("保存原始 RGB 失败: {}", rgbPath.string()); // 非致命
+        spdlog::warn("Failed to save original RGB: {}", rgbPath.string()); // non-fatal
     } else {
-        spdlog::info("原始 RGB 已保存: {}", rgbPath.string());
+        spdlog::info("Original RGB saved: {}", rgbPath.string());
     }
 
     // 2) 从相机抓点云
     open3d::geometry::PointCloud pc;
     if (g_camera->CapFrame(pc) != 0 || pc.points_.empty()) {
-        spdlog::error("相机获取点云帧失败或为空");
+        spdlog::error("Failed to capture point cloud or empty");
         return -23;
     }
 
@@ -198,9 +198,9 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
 
     bool ok_pcd = open3d::io::WritePointCloud(pcdPath.string(), pc, opt);
     if (!ok_pcd) {
-        spdlog::warn("保存原始点云失败: {}", pcdPath.string());
+        spdlog::warn("Failed to save original point cloud: {}", pcdPath.string());
     } else {
-        spdlog::info("原始点云已保存: {}", pcdPath.string());
+        spdlog::info("Original point cloud saved: {}", pcdPath.string());
     }
 
 
@@ -209,11 +209,11 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     
     // 检查状态
     if (!g_ready) {
-        spdlog::error("Pipeline 尚未 initialize()");
+        spdlog::error("Pipeline not initialized");
         return -24;
     }
     if (rgb.empty() || pc.points_.empty()) {
-        spdlog::warn("输入为空: rgb.empty()={} pc.size()={}", rgb.empty(), pc.points_.size());
+        spdlog::warn("Input is empty: rgb.empty()={} pc.size()={}", rgb.empty(), pc.points_.size());
         return -24;
     }
 
@@ -223,7 +223,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     
     std::vector<Ort::Value> outs;
     if (rgb.empty()) {
-        spdlog::error("输入图像为空");
+        spdlog::error("Input image is empty");
         return -25;
     }
     cv::Mat rgb_converted;
@@ -251,11 +251,11 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     spdlog::info("paint:{}", elapsed_ms_infer);
     
     if (rgb.empty()) {
-        spdlog::error("paint_local: 输入图像为空");
+        spdlog::error("Input image is empty");
         return -26;
     }
     if (outs.size() < 3) {
-        spdlog::error("paint_local: 输出不足，期望3个");
+        spdlog::error("Insufficient outputs, expected 3");
         return -27;
     }
     const cv::Scalar color(0, 255, 0);
@@ -299,16 +299,16 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         cv::addWeighted(roi_img, 1.0, overlay, 0.5, 0, roi_img);
         ++kept;
     }
-    spdlog::info("绘制 {} 个实例", kept);
+    spdlog::info("Rendered {} instances", kept);
     
     if (vis.empty()) vis = rgb.clone();
     
     if (rgb.empty()) {
-        spdlog::error("infer_masks_local: 输入图像为空");
+        spdlog::error("Input image is empty");
         return -28;
     }
     if (outs.size() < 3) {
-        spdlog::error("infer_masks_local: 输出不足，期望3个");
+        spdlog::error("Insufficient outputs, expected 3");
         return -29;
     }
     auto sh0_masks = outs[0].GetTensorTypeAndShapeInfo().GetShape();
@@ -344,7 +344,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         fullMask(roi).setTo(255, mask8);
         masks.emplace_back(std::move(fullMask));
     }
-    spdlog::info("共导出 {} 个实例掩膜", masks.size());
+    spdlog::info("Exported {} instance masks", masks.size());
     if (!g_paint_masks_on_vis) vis = rgb.clone();
 
     std::vector<std::pair<cv::RotatedRect, cv::Point2f> > rect_and_mid;
@@ -439,7 +439,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
             }
         }
         if (rect_points.size() < 30) {
-            spdlog::info("[#{}] 框内点过少，跳过 ({} 点)", i, rect_points.size());
+            spdlog::info("[#{}] Too few points in box, skipping ({} points)", i, rect_points.size());
         } else {
             cv::Point2f p0, p1, p3;
             // 展开 bottomEdgeWithThirdPoint_local
@@ -490,7 +490,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
             }
             
             if (!bottomEdgeFound) {
-                spdlog::info("[#{}] 无法获得底边两点/第三点", i);
+                spdlog::info("[#{}] Cannot get bottom edge/third point", i);
             } else {
                 auto pix2dir_impl = [](const cv::Point2f &px) -> Eigen::Vector3d {
                     cv::Vec3d hv(
@@ -596,7 +596,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
                 }
                 
                 if (!planeComputed) {
-                    spdlog::info("[#{}] 平面/交点求解失败", i);
+                    spdlog::info("[#{}] Plane/intersection solving failed", i);
                 } else {
                     cv::Vec3f n_cam_re{n_cam[2], -n_cam[0], -n_cam[1]};
                     cv::Vec3f line_cam_re{line_cam[2], -line_cam[0], -line_cam[1]};
@@ -652,7 +652,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
                         width = w;
                         height = h;
                     } else {
-                        spdlog::warn("[#{}] 计算宽高失败", i);
+                        spdlog::warn("[#{}] Failed to calculate width/height", i);
                     }
 
                     auto norm_local = [](cv::Point3f v)-> cv::Point3f {
@@ -771,7 +771,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     // 4) 输出可视化到 res/<taskId>/vis_on_orig.jpg
     const fs::path outPath = caseDir / "vis_on_orig.jpg";
     if (!cv::imwrite(outPath.string(), vis)) {
-        spdlog::error("写可视化文件失败: {}", outPath.string()); // 非致命
+        spdlog::error("Failed to write visualization file: {}", outPath.string()); // non-fatal
     }
 
     auto t1 = std::chrono::steady_clock::now();
@@ -811,7 +811,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         dst.rw9 = static_cast<double>(R(2, 2));
     }
 
-    spdlog::info("[ OK ] taskId={} -> {}，目标数={}（写入 {} 个），耗时={:.3f} ms",
+    spdlog::info("[ OK ] taskId={} -> {}, targets={} (written {}), time={:.3f} ms",
                  taskId, outPath.string(), total, n_write, elapsed_ms);
 
     // 6) 写入 JSON（增加原始数据文件路径）
@@ -839,11 +839,11 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     const fs::path jsonPath = caseDir / "boxes.json";
     std::ofstream ofs(jsonPath);
     if (!ofs) {
-        spdlog::error("写 JSON 失败（无法打开文件）: {}", jsonPath.string());
+        spdlog::error("Failed to write JSON (cannot open file): {}", jsonPath.string());
     } else {
         ofs << std::setw(2) << j;
         ofs.close();
-        spdlog::info("JSON 已写入: {}", jsonPath.string());
+        spdlog::info("JSON written: {}", jsonPath.string());
     }
     return n_write; // 返回写入个数
 }

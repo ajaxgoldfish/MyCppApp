@@ -8,6 +8,15 @@
 namespace fs = std::filesystem;
 
 int main() {
+
+    // 设置控制台为UTF-8编码，解决中文乱码问题
+#ifdef _WIN32
+    // Windows系统设置
+    SetConsoleOutputCP(CP_UTF8);           // 设置控制台输出代码页为UTF-8
+    SetConsoleCP(CP_UTF8);                 // 设置控制台输入代码页为UTF-8
+    // 注意：不使用_setmode，因为它可能与spdlog冲突
+#endif
+
     // ====== 0) spdlog 基础配置 ======
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
     spdlog::set_level(spdlog::level::info);
