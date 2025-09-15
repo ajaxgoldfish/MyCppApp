@@ -59,38 +59,6 @@ namespace {
         int u, v, pid;
     };
 
-    void collectRectsAndBottomMids_(
-        const std::vector<cv::Mat1b> &masks,
-        std::vector<std::pair<cv::RotatedRect, cv::Point2f> > &rect_and_mid) {
-        rect_and_mid.clear();
-        rect_and_mid.reserve(masks.size());
-        for (const auto &m: masks) {
-            if (m.empty()) continue;
-            cv::RotatedRect obb;
-            if (FusionGeometry::maskToObb(m, obb)) {
-                cv::Point2f midCenter;
-                int midRadius;
-                if (FusionGeometry::bottomMidpointCircle(obb, midCenter, midRadius)) {
-                    rect_and_mid.emplace_back(obb, midCenter);
-                }
-            }
-        }
-    }
-
-    void projectPointCloud_(const open3d::geometry::PointCloud &pc_cam, int W, int H, std::vector<Proj> &proj) {
-        const double fx = g_K.at<double>(0, 0), fy = g_K.at<double>(1, 1);
-        const double cx = g_K.at<double>(0, 2), cy = g_K.at<double>(1, 2);
-        proj.clear();
-        proj.reserve(pc_cam.points_.size());
-        for (int i = 0; i < (int) pc_cam.points_.size(); ++i) {
-            const auto &p = pc_cam.points_[i];
-            if (p.z() <= 0) continue;
-            int u = (int) std::round(fx * p.x() / p.z() + cx);
-            int v = (int) std::round(fy * p.y() / p.z() + cy);
-            if ((unsigned) u >= (unsigned) W || (unsigned) v >= (unsigned) H) continue;
-            proj.push_back({u, v, i});
-        }
-    }
 
 } // namespace
 
@@ -362,13 +330,36 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     spdlog::info("共导出 {} 个实例掩膜", masks.size());
     if (!g_opt.paint_masks_on_vis) vis = rgb.clone();
 
-    // 收集矩形和底部中点
+    // 收集矩形和底部中点（展开 collectRectsAndBottomMids_）
     std::vector<std::pair<cv::RotatedRect, cv::Point2f> > rect_and_mid;
-    collectRectsAndBottomMids_(masks, rect_and_mid);
+    rect_and_mid.clear();
+    rect_and_mid.reserve(masks.size());
+    for (const auto &m: masks) {
+        if (m.empty()) continue;
+        cv::RotatedRect obb;
+        if (FusionGeometry::maskToObb(m, obb)) {
+            cv::Point2f midCenter;
+            int midRadius;
+            if (FusionGeometry::bottomMidpointCircle(obb, midCenter, midRadius)) {
+                rect_and_mid.emplace_back(obb, midCenter);
+            }
+        }
+    }
 
-    // 投影点云
+    // 投影点云（展开 projectPointCloud_）
     std::vector<Proj> proj;
-    projectPointCloud_(pc, rgb.cols, rgb.rows, proj);
+    const double fx = g_K.at<double>(0, 0), fy = g_K.at<double>(1, 1);
+    const double cx = g_K.at<double>(0, 2), cy = g_K.at<double>(1, 2);
+    proj.clear();
+    proj.reserve(pc.points_.size());
+    for (int i = 0; i < (int) pc.points_.size(); ++i) {
+        const auto &p = pc.points_[i];
+        if (p.z() <= 0) continue;
+        int u = (int) std::round(fx * p.x() / p.z() + cx);
+        int v = (int) std::round(fy * p.y() / p.z() + cy);
+        if ((unsigned) u >= (unsigned) rgb.cols || (unsigned) v >= (unsigned) rgb.rows) continue;
+        proj.push_back({u, v, i});
+    }
 
     results.clear();
     results.reserve(rect_and_mid.size());
