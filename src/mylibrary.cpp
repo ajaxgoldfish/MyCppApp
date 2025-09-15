@@ -54,16 +54,6 @@ namespace {
     bool g_ready = false;
     std::string g_root_dir = "res"; // 仅用于输出可视化
 
-    bool inRotRectFast(const cv::RotatedRect &rr, int u, int v) {
-        const float cx = rr.center.x, cy = rr.center.y;
-        const float hw = rr.size.width * 0.5f, hh = rr.size.height * 0.5f;
-        const float ang = rr.angle * (float) CV_PI / 180.f;
-        const float ca = std::cos(ang), sa = std::sin(ang);
-        const float dx = (float) u - cx, dy = (float) v - cy;
-        const float x = dx * ca + dy * sa;
-        const float y = -dx * sa + dy * ca;
-        return std::fabs(x) <= hw && std::fabs(y) <= hh;
-    }
 
     struct Proj {
         int u, v, pid;
@@ -395,7 +385,17 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         std::vector<Eigen::Vector3d> rect_points;
         rect_points.reserve(4096);
         for (const auto &pr: proj) {
-            if (inRotRectFast(rrect, pr.u, pr.v)) {
+            // 展开 inRotRectFast - 判断点是否在旋转矩形内
+            const float cx = rrect.center.x, cy = rrect.center.y;
+            const float hw = rrect.size.width * 0.5f, hh = rrect.size.height * 0.5f;
+            const float ang = rrect.angle * (float) CV_PI / 180.f;
+            const float ca = std::cos(ang), sa = std::sin(ang);
+            const float dx = (float) pr.u - cx, dy = (float) pr.v - cy;
+            const float x = dx * ca + dy * sa;
+            const float y = -dx * sa + dy * ca;
+            bool in_rect = std::fabs(x) <= hw && std::fabs(y) <= hh;
+            
+            if (in_rect) {
                 rect_points.push_back(pc.points_[pr.pid]);
             }
         }
