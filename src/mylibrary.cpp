@@ -20,30 +20,7 @@ namespace {
     BoxPosePipeline::Options         g_opt;
     std::string                      g_root_dir = "res"; // 仅用于输出可视化
 
-    // Pipeline 就绪
-    bool ensure_pipeline_ready() {
-        if (g_pipeline) return true;
-        g_pipeline = std::make_unique<BoxPosePipeline>(g_opt);
-        if (!g_pipeline->initialize()) {
-            spdlog::critical("BoxPosePipeline.initialize() 失败");
-            g_pipeline.reset();
-            return false;
-        }
-        return true;
-    }
-
-    // Camera 就绪
-    bool ensure_camera_ready() {
-        if (g_camera && g_camera->isOpened()) return true;
-        g_camera = std::make_unique<LanxinCamera>(); // 构造里会 connect()
-        if (!g_camera->isOpened()) {
-            spdlog::critical("LanxinCamera 连接失败");
-            g_camera.reset();
-            return false;
-        }
-        spdlog::info("LanxinCamera 已连接");
-        return true;
-    }
+    
 
     // 将一次 pipeline 结果写入 Box（按你给的字段）
     static inline void write_one_box(::zzb::Box& dst, const BoxPoseResult& src) {
@@ -93,10 +70,25 @@ int bs_yzx_init(const bool isDebug) {
     g_opt.paint_masks_on_vis = true;
 
     // 初始化 pipeline
-    if (!ensure_pipeline_ready()) return -1;
+    if (!g_pipeline) {
+        g_pipeline = std::make_unique<BoxPosePipeline>(g_opt);
+        if (!g_pipeline->initialize()) {
+            spdlog::critical("BoxPosePipeline.initialize() 失败");
+            g_pipeline.reset();
+            return -1;
+        }
+    }
 
     // 初始化 camera
-    if (!ensure_camera_ready())   return -2;
+    if (!g_camera || !g_camera->isOpened()) {
+        g_camera = std::make_unique<LanxinCamera>(); // 构造里会 connect()
+        if (!g_camera->isOpened()) {
+            spdlog::critical("LanxinCamera 连接失败");
+            g_camera.reset();
+            return -2;
+        }
+        spdlog::info("LanxinCamera 已连接");
+    }
 
     // 可选：查看相机参数
     // const cv::Mat param = g_camera->get_param();
@@ -107,8 +99,8 @@ int bs_yzx_init(const bool isDebug) {
 }
 
 int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
-    if (!ensure_pipeline_ready()) return -10; // 未初始化 pipeline
-    if (!ensure_camera_ready())   return -11; // 未初始化 camera
+    if (!g_pipeline) return -10; // 未初始化 pipeline
+    if (!g_camera || !g_camera->isOpened()) return -11; // 未初始化 camera
 
     auto t0 = std::chrono::steady_clock::now();
 
