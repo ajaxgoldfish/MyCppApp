@@ -790,10 +790,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         dst.rw9 = static_cast<double>(R(2, 2));
     }
 
-    spdlog::info("[ OK ] taskId={} -> {}, targets={} (written {}), time={:.3f} ms, input: rgb.jpg, pcAll.pcd",
-                 taskId, outPath.string(), total, n_write, elapsed_ms);
-
-    // 6) 写入 JSON（增加原始数据文件路径）
     json j;
     j["taskId"] = taskId;
     j["elapsed_ms"] = elapsed_ms;
