@@ -40,7 +40,6 @@ namespace {
         Eigen::Matrix3d Rw;
     };
 
-    std::unique_ptr<LanxinCamera> g_camera;
 
     struct RunnerState {
         Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "mrcnn"};
@@ -144,67 +143,56 @@ int bs_yzx_init(const bool isDebug) {
         }
     }
 
-    // 初始化 camera
-    if (!g_camera || !g_camera->isOpened()) {
-        g_camera = std::make_unique<LanxinCamera>(); // 构造里会 connect()
-        if (!g_camera->isOpened()) {
-            spdlog::critical("LanxinCamera 连接失败");
-            g_camera.reset();
-            return -2;
-        }
-        spdlog::info("LanxinCamera 已连接");
-    }
 
     spdlog::info("bs_yzx_init 完成（debug={}）", isDebug);
     return 0;
 }
 
+// CPU版本的目标检测函数，从文件读取RGB图像和点云数据
+// taskId: 用于指定读取数据的子目录 res/<taskId>/
+// 需要的文件：rgb.jpg（RGB图像）、pcAll.pcd（点云数据）
 int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     if (!g_ready) return -10; // 未初始化 pipeline
-    if (!g_camera || !g_camera->isOpened()) return -11; // 未初始化 camera
 
     auto t0 = std::chrono::steady_clock::now();
 
-    // 0) 结果目录：res/<taskId>/
+    // 0) 数据目录：res/<taskId>/ (从此目录读取输入数据)
     const fs::path caseDir = fs::path(g_root_dir) / std::to_string(taskId);
-    std::error_code ec_mkdir;
-    fs::create_directories(caseDir, ec_mkdir); // 目录不存在则创建
+    if (!fs::exists(caseDir)) {
+        spdlog::error("数据目录不存在: {}", caseDir.string());
+        return -21;
+    }
 
-    // 1) 从相机抓图像
+    // 从文件夹读取RGB和点云数据
     cv::Mat rgb;
-    if (g_camera->CapFrame(rgb) != 0 || rgb.empty()) {
-        spdlog::error("相机获取 RGB 帧失败");
+    open3d::geometry::PointCloud pc;
+    
+    // 读取RGB图像：rgb.jpg
+    const fs::path rgbPath = caseDir / "rgb.jpg";
+    if (!fs::exists(rgbPath)) {
+        spdlog::error("RGB文件不存在: {}", rgbPath.string());
         return -22;
     }
-
-    // 1.1 保存原始 RGB
-    const fs::path rgbPath = caseDir / "rgb_orig.jpg";
-    if (!cv::imwrite(rgbPath.string(), rgb)) {
-        spdlog::warn("保存原始 RGB 失败: {}", rgbPath.string()); // 非致命
-    } else {
-        spdlog::info("原始 RGB 已保存: {}", rgbPath.string());
+    
+    rgb = cv::imread(rgbPath.string(), cv::IMREAD_COLOR);
+    if (rgb.empty()) {
+        spdlog::error("无法读取RGB图像: {}", rgbPath.string());
+        return -22;
     }
-
-    // 2) 从相机抓点云
-    open3d::geometry::PointCloud pc;
-    if (g_camera->CapFrame(pc) != 0 || pc.points_.empty()) {
-        spdlog::error("相机获取点云帧失败或为空");
+    spdlog::info("从文件读取RGB: {}", rgbPath.string());
+    
+    // 读取点云数据：pcAll.pcd
+    const fs::path pcdPath = caseDir / "pcAll.pcd";
+    if (!fs::exists(pcdPath)) {
+        spdlog::error("点云文件不存在: {}", pcdPath.string());
         return -23;
     }
-
-    const fs::path pcdPath = caseDir / "cloud_orig.pcd";
-
-    open3d::io::WritePointCloudOption opt;
-    opt.write_ascii = open3d::io::WritePointCloudOption::IsAscii::Ascii; // ASCII
-    opt.compressed = open3d::io::WritePointCloudOption::Compressed::Uncompressed; // 不压缩
-    opt.print_progress = false;
-
-    bool ok_pcd = open3d::io::WritePointCloud(pcdPath.string(), pc, opt);
-    if (!ok_pcd) {
-        spdlog::warn("保存原始点云失败: {}", pcdPath.string());
-    } else {
-        spdlog::info("原始点云已保存: {}", pcdPath.string());
+    
+    if (!open3d::io::ReadPointCloud(pcdPath.string(), pc) || pc.points_.empty()) {
+        spdlog::error("无法读取点云数据: {}", pcdPath.string());
+        return -23;
     }
+    spdlog::info("从文件读取点云: {}", pcdPath.string());
 
 
     std::vector<LocalBoxPoseResult> results;
@@ -824,7 +812,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         dst.rw9 = static_cast<double>(R(2, 2));
     }
 
-    spdlog::info("[ OK ] taskId={} -> {}，目标数={}（写入 {} 个），耗时={:.3f} ms",
+    spdlog::info("[ OK ] taskId={} -> {}，目标数={}（写入 {} 个），耗时={:.3f} ms，输入：rgb.jpg, pcAll.pcd",
                  taskId, outPath.string(), total, n_write, elapsed_ms);
 
     // 6) 写入 JSON（增加原始数据文件路径）
@@ -834,8 +822,8 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     j["total"] = total;
     j["n_write"] = n_write;
     j["out_image"] = outPath.string();
-    j["raw_rgb"] = rgbPath.string();
-    j["raw_pcd"] = pcdPath.string();
+    j["input_rgb"] = rgbPath.string();
+    j["input_pcd"] = pcdPath.string();
 
     auto &arr = j["boxes"] = json::array();
     for (int i = 0; i < n_write; ++i) {
