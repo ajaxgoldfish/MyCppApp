@@ -144,8 +144,6 @@ int bs_yzx_init(const bool isDebug) {
         }
     }
 
-
-    spdlog::info("bs_yzx_init completed (debug={})", isDebug);
     return 0;
 }
 
@@ -208,8 +206,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
 
 
     std::vector<cv::Mat1b> masks;
-    auto t0_infer = std::chrono::steady_clock::now();
-    
     std::vector<Ort::Value> outs;
     if (rgb.empty()) {
         spdlog::error("Input image is empty");
@@ -234,10 +230,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     outs = g_session->Run(Ort::RunOptions{nullptr}, in_names, &input, 1,
                           g_out_names.data(), g_out_names.size());
     
-    auto t1_infer = std::chrono::steady_clock::now();
-    double elapsed_ms_infer = std::chrono::duration<double, std::milli>(t1_infer - t0_infer).count();
-    spdlog::info("paint:{}", elapsed_ms_infer);
-    
+
     if (rgb.empty()) {
         spdlog::error("Input image is empty");
         return -26;
@@ -287,8 +280,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         cv::addWeighted(roi_img, 1.0, overlay, 0.5, 0, roi_img);
         ++kept;
     }
-    spdlog::info("Rendered {} instances", kept);
-    
+
     if (vis.empty()) vis = rgb.clone();
     
     if (rgb.empty()) {
@@ -332,7 +324,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         fullMask(roi).setTo(255, mask8);
         masks.emplace_back(std::move(fullMask));
     }
-    spdlog::info("Exported {} instance masks", masks.size());
     if (!g_paint_masks_on_vis) vis = rgb.clone();
 
     std::vector<std::pair<cv::RotatedRect, cv::Point2f> > rect_and_mid;
@@ -831,7 +822,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     } else {
         ofs << std::setw(2) << j;
         ofs.close();
-        spdlog::info("JSON written: {}", jsonPath.string());
     }
     return n_write; // 返回写入个数
 }

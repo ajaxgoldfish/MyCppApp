@@ -248,7 +248,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     
     auto t1_infer = std::chrono::steady_clock::now();
     double elapsed_ms_infer = std::chrono::duration<double, std::milli>(t1_infer - t0_infer).count();
-    spdlog::info("paint:{}", elapsed_ms_infer);
+    spdlog::info("maskrcnn 识别 用时:{}", elapsed_ms_infer);
     
     if (rgb.empty()) {
         spdlog::error("Input image is empty");
@@ -843,7 +843,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     } else {
         ofs << std::setw(2) << j;
         ofs.close();
-        spdlog::info("JSON written: {}", jsonPath.string());
     }
     return n_write; // 返回写入个数
 }

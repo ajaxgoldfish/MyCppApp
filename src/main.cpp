@@ -17,13 +17,6 @@ int main() {
     // 注意：不使用_setmode，因为它可能与spdlog冲突
 #endif
 
-    // ====== 0) spdlog 基础配置 ======
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
-    spdlog::set_level(spdlog::level::info);
-    spdlog::flush_on(spdlog::level::err);
-
-    spdlog::info("=== CPU Library 版本目标检测演示 ===");
-
     // ====== 1) 初始化 CPU Library ======
     bool isDebug = true;  // 可以设置为 false 来减少调试信息
     int init_result = bs_yzx_init(isDebug);
@@ -31,8 +24,6 @@ int main() {
         spdlog::critical("bs_yzx_init 失败，错误码: {}", init_result);
         return -1;
     }
-    spdlog::info("CPU Library 初始化成功");
-
     // ====== 2) 遍历 res 目录，处理每个任务 ======
     const fs::path root = "res";
     if (!fs::exists(root) || !fs::is_directory(root)) {
@@ -96,15 +87,6 @@ int main() {
                      taskId, detectedCount, elapsed_ms);
 
         ++ok_cnt;
-    }
-
-    // ====== 5) 总结 ======
-    spdlog::info("=== 处理完成 ===");
-    spdlog::info("成功: {}, 跳过: {}, 错误: {}", ok_cnt, skip_cnt, err_cnt);
-    
-    if (ok_cnt > 0) {
-        spdlog::info("可视化结果已保存在各自目录的 vis_on_orig.jpg");
-        spdlog::info("详细结果已保存在各自目录的 boxes.json");
     }
 
     return (err_cnt > 0 && ok_cnt == 0) ? -1 : 0;
