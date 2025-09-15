@@ -79,7 +79,6 @@ namespace {
     struct Proj { int u, v, pid; };
 
     // 前向声明：本地 Pipeline 函数
-    static bool pipeline_initialize();
     static bool inferMasks_(const cv::Mat& rgb, cv::Mat& vis, std::vector<cv::Mat1b>& masks);
     static void collectRectsAndBottomMids_(const std::vector<cv::Mat1b>& masks,
                                            std::vector<std::pair<cv::RotatedRect, cv::Point2f>>& rect_and_mid);
@@ -126,24 +125,7 @@ namespace {
         dst.rw9 = static_cast<double>(R(2,2));
     }
     // ====== 本地 Pipeline 具体实现 ======
-    static bool pipeline_initialize() {
-        try {
-            FusionGeometry::initIntrinsic(g_opt.calib_path);
-            FusionGeometry::initExtrinsic(g_opt.calib_path);
-            g_K    = FusionGeometry::getIntrinsic().clone(); // CV_64F
-            g_Kinv = g_K.inv();
-            g_Twc  = FusionGeometry::getExtrinsic().clone(); // 4x4
-            if (g_Twc.type() != CV_32F) g_Twc.convertTo(g_Twc, CV_32F);
-
-            g_runner = std::make_unique<MaskRCNNRunner>(g_opt.model_path);
-            g_ready = true;
-            return true;
-        } catch (const std::exception& e) {
-            spdlog::error("初始化失败: {}", e.what());
-            g_ready = false;
-            return false;
-        }
-    }
+    
 
     static bool inferMasks_(const cv::Mat& rgb, cv::Mat& vis, std::vector<cv::Mat1b>& masks) {
         auto t0 = std::chrono::steady_clock::now();
@@ -456,10 +438,21 @@ int bs_yzx_init(const bool isDebug) {
     g_opt.mask_thr   = 0.5f;
     g_opt.paint_masks_on_vis = true;
 
-    // 初始化 pipeline（本地实现）
+    // 初始化 pipeline（本地实现，内联）
     if (!g_ready) {
-        if (!pipeline_initialize()) {
-            spdlog::critical("Pipeline 初始化失败");
+        try {
+            FusionGeometry::initIntrinsic(g_opt.calib_path);
+            FusionGeometry::initExtrinsic(g_opt.calib_path);
+            g_K    = FusionGeometry::getIntrinsic().clone(); // CV_64F
+            g_Kinv = g_K.inv();
+            g_Twc  = FusionGeometry::getExtrinsic().clone(); // 4x4
+            if (g_Twc.type() != CV_32F) g_Twc.convertTo(g_Twc, CV_32F);
+
+            g_runner = std::make_unique<MaskRCNNRunner>(g_opt.model_path);
+            g_ready = true;
+        } catch (const std::exception& e) {
+            spdlog::critical("Pipeline 初始化失败: {}", e.what());
+            g_ready = false;
             return -1;
         }
     }
