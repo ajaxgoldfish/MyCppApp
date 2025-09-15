@@ -90,10 +90,6 @@ int bs_yzx_init(const bool isDebug) {
         spdlog::info("LanxinCamera 已连接");
     }
 
-    // 可选：查看相机参数
-    // const cv::Mat param = g_camera->get_param();
-    // spdlog::debug("Camera param size={}x{}, type={}", param.rows, param.cols, param.type());
-
     spdlog::info("bs_yzx_init 完成（debug={}）", isDebug);
     return 0;
 }

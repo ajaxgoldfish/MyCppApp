@@ -1,12 +1,9 @@
-// BoxPosePipeline.h
 #pragma once
 #include <opencv2/opencv.hpp>
 #include <open3d/Open3D.h>
 #include <memory>
 #include <vector>
 #include <string>
-
-// 只做前置声明
 class MaskRCNNRunner;
 
 struct BoxPoseResult {
@@ -17,21 +14,21 @@ struct BoxPoseResult {
     cv::RotatedRect obb;
     cv::Point2f bottomMidPx{};
     cv::Point3f p1_w_m{}, p2_w_m{}, p3_w_m{};
-    Eigen::Matrix3d Rw;                 // 旋转矩阵 (世界系下的朝向)
+    Eigen::Matrix3d Rw;
 };
 
 // ========================
 // Box 姿态结果（旋转矩阵版）
 // ========================
 struct BoxPoseRotationResult {
-    int id = -1;                     // 箱子编号
-    cv::Point3f xyz_m{};             // 世界坐标系下中心点 (米)
-    cv::Matx33f R;                   // 旋转矩阵 (世界系下的朝向)
-    float width_m = 0.f;             // 箱子宽度 (米)
-    float height_m = 0.f;            // 箱子高度 (米)
-    cv::RotatedRect obb;             // 原始2D OBB
-    cv::Point2f bottomMidPx{};       // 图像底边中点
-    cv::Point3f p1_w_m{}, p2_w_m{}, p3_w_m{}; // 三个基准点 (米)
+    int id = -1;
+    cv::Point3f xyz_m{};
+    cv::Matx33f R;
+    float width_m = 0.f;
+    float height_m = 0.f;
+    cv::RotatedRect obb;
+    cv::Point2f bottomMidPx{};
+    cv::Point3f p1_w_m{}, p2_w_m{}, p3_w_m{};
 };
 
 
@@ -47,7 +44,6 @@ public:
 
     explicit BoxPosePipeline(const Options& opt);
 
-    // 关键：这里只声明，不内联定义
     ~BoxPosePipeline();
 
     bool initialize();
@@ -96,7 +92,7 @@ private:
 
 private:
     Options options_;
-    std::unique_ptr<MaskRCNNRunner> runner_; // 前置声明 + unique_ptr 没问题（析构放到 .cpp）
+    std::unique_ptr<MaskRCNNRunner> runner_;
     cv::Mat K_, Kinv_, T_wc_;
     bool ready_ = false;
 };
