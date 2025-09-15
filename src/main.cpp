@@ -71,7 +71,7 @@ int main() {
         auto t0 = std::chrono::steady_clock::now();
         int detectionResult = bs_yzx_object_detection_lanxin(taskId, boxArr);
         auto t1 = std::chrono::steady_clock::now();
-        
+
         double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
         if (detectionResult < 0) {
@@ -82,21 +82,9 @@ int main() {
 
         // ====== 4) 输出结果 ======
         int detectedCount = detectionResult;  // 返回值是检测到的目标数量
-        
-        spdlog::info("[ OK ] taskId={}, 检测到 {} 个目标，耗时={:.3f} ms", 
-                     taskId, detectedCount, elapsed_ms);
 
-        // 打印每个检测到的目标的详细信息
-        for (int i = 0; i < detectedCount; ++i) {
-            const auto& box = boxArr[i];
-            spdlog::info("  目标 #{}: 位置=({:.3f}, {:.3f}, {:.3f}), "
-                        "尺寸=({:.3f}m, {:.3f}m), "
-                        "角度=({:.1f}°, {:.1f}°, {:.1f}°)",
-                        i + 1,
-                        box.x, box.y, box.z,
-                        box.width, box.height,
-                        box.angle_a, box.angle_b, box.angle_c);
-        }
+        spdlog::info("[ OK ] taskId={}, 检测到 {} 个目标，耗时={:.3f} ms",
+                     taskId, detectedCount, elapsed_ms);
 
         ++ok_cnt;
     }

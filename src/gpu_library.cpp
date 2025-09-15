@@ -43,7 +43,7 @@ namespace {
     std::unique_ptr<LanxinCamera> g_camera;
 
     // ONNX Runtime 全局变量（原 RunnerState 成员）
-    Ort::Env g_env{ORT_LOGGING_LEVEL_WARNING, "mrcnn"};
+    std::unique_ptr<Ort::Env> g_env;  // 延迟初始化，避免静态初始化问题
     std::unique_ptr<Ort::Session> g_session;
     std::string g_in_name;
     std::vector<std::string> g_out_names_s;
@@ -114,11 +114,16 @@ int bs_yzx_init(const bool isDebug) {
             if (g_Twc.type() != CV_32F) g_Twc.convertTo(g_Twc, CV_32F);
 
             // 创建本地 ORT Session
+            // 先初始化 Env（延迟初始化，避免静态初始化问题）
+            if (!g_env) {
+                g_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "mrcnn");
+            }
+            
             Ort::SessionOptions so;
             so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
             std::wstring model_path_wide(g_model_path.begin(), g_model_path.end());
-            g_session = std::make_unique<Ort::Session>(g_env, model_path_wide.c_str(), so);
+            g_session = std::make_unique<Ort::Session>(*g_env, model_path_wide.c_str(), so);
             
             Ort::AllocatorWithDefaultOptions alloc;
             g_in_name = g_session->GetInputNameAllocated(0, alloc).get();
@@ -239,17 +244,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     const char *in_names[] = {g_in_name.c_str()};
     outs = g_session->Run(Ort::RunOptions{nullptr}, in_names, &input, 1,
                           g_out_names.data(), g_out_names.size());
-    for (size_t idx = 0; idx < outs.size(); ++idx) {
-        auto shape = outs[idx].GetTensorTypeAndShapeInfo().GetShape();
-        std::ostringstream oss;
-        oss << "outs[" << idx << "] shape = [";
-        for (size_t j = 0; j < shape.size(); ++j) {
-            oss << shape[j];
-            if (j + 1 < shape.size()) oss << ", ";
-        }
-        oss << "]";
-        spdlog::info("{}", oss.str());
-    }
+
     
     auto t1_infer = std::chrono::steady_clock::now();
     double elapsed_ms_infer = std::chrono::duration<double, std::milli>(t1_infer - t0_infer).count();
