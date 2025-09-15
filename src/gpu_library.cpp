@@ -42,15 +42,12 @@ namespace {
 
     std::unique_ptr<LanxinCamera> g_camera;
 
-    struct RunnerState {
-        Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "mrcnn"};
-        std::unique_ptr<Ort::Session> session;
-        std::string in_name;
-        std::vector<std::string> out_names_s;
-        std::vector<const char *> out_names;
-    };
-
-    std::unique_ptr<RunnerState> g_runner;
+    // ONNX Runtime 全局变量（原 RunnerState 成员）
+    Ort::Env g_env{ORT_LOGGING_LEVEL_WARNING, "mrcnn"};
+    std::unique_ptr<Ort::Session> g_session;
+    std::string g_in_name;
+    std::vector<std::string> g_out_names_s;
+    std::vector<const char *> g_out_names;
     cv::Mat g_K, g_Kinv, g_Twc; // K: CV_64F, Twc: CV_32F
     bool g_ready = false;
     std::string g_root_dir = "res"; // 仅用于输出可视化
@@ -117,21 +114,20 @@ int bs_yzx_init(const bool isDebug) {
             if (g_Twc.type() != CV_32F) g_Twc.convertTo(g_Twc, CV_32F);
 
             // 创建本地 ORT Session
-            g_runner = std::make_unique<RunnerState>();
             Ort::SessionOptions so;
             so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
             std::wstring model_path_wide(g_model_path.begin(), g_model_path.end());
-            g_runner->session = std::make_unique<Ort::Session>(g_runner->env,
-                                                               model_path_wide.c_str(), so);
+            g_session = std::make_unique<Ort::Session>(g_env, model_path_wide.c_str(), so);
+            
             Ort::AllocatorWithDefaultOptions alloc;
-            g_runner->in_name = g_runner->session->GetInputNameAllocated(0, alloc).get();
-            size_t out_count = g_runner->session->GetOutputCount();
-            g_runner->out_names_s.reserve(out_count);
+            g_in_name = g_session->GetInputNameAllocated(0, alloc).get();
+            size_t out_count = g_session->GetOutputCount();
+            g_out_names_s.reserve(out_count);
             for (size_t i = 0; i < out_count; ++i) {
-                g_runner->out_names_s.emplace_back(g_runner->session->GetOutputNameAllocated(i, alloc).get());
+                g_out_names_s.emplace_back(g_session->GetOutputNameAllocated(i, alloc).get());
             }
-            for (auto &s: g_runner->out_names_s) g_runner->out_names.push_back(s.c_str());
+            for (auto &s: g_out_names_s) g_out_names.push_back(s.c_str());
             g_ready = true;
         } catch (const std::exception &e) {
             spdlog::critical("Pipeline 初始化失败: {}", e.what());
@@ -240,9 +236,9 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     Ort::Value input = Ort::Value::CreateTensor<float>(
         mi, reinterpret_cast<float *>(blob.data), static_cast<size_t>(blob.total()), ishape.data(), ishape.size());
-    const char *in_names[] = {g_runner->in_name.c_str()};
-    outs = g_runner->session->Run(Ort::RunOptions{nullptr}, in_names, &input, 1,
-                                       g_runner->out_names.data(), g_runner->out_names.size());
+    const char *in_names[] = {g_in_name.c_str()};
+    outs = g_session->Run(Ort::RunOptions{nullptr}, in_names, &input, 1,
+                          g_out_names.data(), g_out_names.size());
     for (size_t idx = 0; idx < outs.size(); ++idx) {
         auto shape = outs[idx].GetTensorTypeAndShapeInfo().GetShape();
         std::ostringstream oss;
