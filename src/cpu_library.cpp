@@ -10,7 +10,6 @@
 #include <cmath>
 #include <opencv2/dnn.hpp>
 #include <algorithm>
-#include <omp.h>  // OpenMP并行计算支持
 using nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -62,12 +61,6 @@ namespace {
 
 
 int bs_yzx_init(const bool isDebug) {
-    // OpenMP并行计算配置
-    const int max_threads = omp_get_max_threads();
-    const int optimal_threads = std::min(max_threads, 8);  // 限制最大线程数避免过度并行化
-    omp_set_num_threads(optimal_threads);
-    spdlog::info("OpenMP 并行优化已启用，使用 {} 个线程", optimal_threads);
-    
     // spdlog 基础配置
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
     spdlog::set_level(isDebug ? spdlog::level::debug : spdlog::level::info);
@@ -314,18 +307,11 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     const float *dets_masks = outs[0].GetTensorData<float>();
     const float *masks_data_masks = outs[2].GetTensorData<float>();
     masks.clear();
-    
-    // OpenMP并行优化：掩膜处理
-    std::vector<cv::Mat1b> temp_masks(N_masks);
-    std::vector<bool> valid_masks(N_masks, false);
-    
-    // 并行处理每个检测目标的掩膜
-    #pragma omp parallel for schedule(dynamic)
+    masks.reserve((size_t) N_masks);
     for (int64_t i = 0; i < N_masks; ++i) {
         const float *r = dets_masks + i * 5;
         float sc = r[4];
         if (sc < g_score_thr) continue;
-        
         int x1 = std::lround(r[0]), y1 = std::lround(r[1]);
         int x2 = std::lround(r[2]), y2 = std::lround(r[3]);
         x1 = std::clamp(x1, 0, rgb.cols - 1);
@@ -336,7 +322,6 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         cv::Rect roi(x1, y1, ow, oh);
         roi &= cv::Rect(0, 0, rgb.cols, rgb.rows);
         if (roi.area() <= 0) continue;
-        
         const float *mptr = masks_data_masks + i * (mH_masks * mW_masks);
         cv::Mat mask_f32(mH_masks, mW_masks, CV_32F, const_cast<float *>(mptr));
         cv::Mat mask_up;
@@ -345,34 +330,16 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
         cv::compare(mask_up, g_mask_thr, mask8, cv::CMP_GT);
         cv::Mat1b fullMask(rgb.rows, rgb.cols, (uchar) 0);
         fullMask(roi).setTo(255, mask8);
-        
-        temp_masks[i] = std::move(fullMask);
-        valid_masks[i] = true;
-    }
-    
-    // 收集有效的掩膜（串行，但很快）
-    masks.reserve((size_t) N_masks);
-    for (int64_t i = 0; i < N_masks; ++i) {
-        if (valid_masks[i]) {
-            masks.emplace_back(std::move(temp_masks[i]));
-        }
+        masks.emplace_back(std::move(fullMask));
     }
     spdlog::info("共导出 {} 个实例掩膜", masks.size());
     if (!g_paint_masks_on_vis) vis = rgb.clone();
 
     std::vector<std::pair<cv::RotatedRect, cv::Point2f> > rect_and_mid;
     rect_and_mid.clear();
-    
-    // OpenMP并行优化：掩膜到旋转矩形转换
-    const int num_masks = (int) masks.size();
-    std::vector<std::pair<cv::RotatedRect, cv::Point2f>> temp_rect_and_mid(num_masks);
-    std::vector<bool> valid_rects(num_masks, false);
-    
-    #pragma omp parallel for schedule(dynamic)
-    for (int idx = 0; idx < num_masks; ++idx) {
-        const auto &m = masks[idx];
+    rect_and_mid.reserve(masks.size());
+    for (const auto &m: masks) {
         if (m.empty()) continue;
-        
         cv::RotatedRect obb;
         // 展开 maskToObb_local
         obb = cv::RotatedRect();
@@ -413,18 +380,9 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
                     int midRadius = cvRound(major * 0.02f);
                     if (midRadius < 2) midRadius = 2;
                     
-                    temp_rect_and_mid[idx] = std::make_pair(obb, midCenter);
-                    valid_rects[idx] = true;
+                    rect_and_mid.emplace_back(obb, midCenter);
                 }
             }
-        }
-    }
-    
-    // 收集有效的矩形和中点（串行，但很快）
-    rect_and_mid.reserve(num_masks);
-    for (int idx = 0; idx < num_masks; ++idx) {
-        if (valid_rects[idx]) {
-            rect_and_mid.emplace_back(temp_rect_and_mid[idx]);
         }
     }
 
@@ -432,37 +390,15 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     const double fx = g_K.at<double>(0, 0), fy = g_K.at<double>(1, 1);
     const double cx = g_K.at<double>(0, 2), cy = g_K.at<double>(1, 2);
     proj.clear();
-    
-    // OpenMP并行优化：点云投影计算
-    auto t_proj_start = std::chrono::steady_clock::now();
-    const int num_points = (int) pc.points_.size();
-    std::vector<bool> valid_points(num_points, false);
-    std::vector<Proj> temp_proj(num_points);
-    
-    // 第一步：并行计算每个点的投影和有效性
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < num_points; ++i) {
+    proj.reserve(pc.points_.size());
+    for (int i = 0; i < (int) pc.points_.size(); ++i) {
         const auto &p = pc.points_[i];
-        if (p.z() > 0) {
-            int u = (int) std::round(fx * p.x() / p.z() + cx);
-            int v = (int) std::round(fy * p.y() / p.z() + cy);
-            if ((unsigned) u < (unsigned) rgb.cols && (unsigned) v < (unsigned) rgb.rows) {
-                temp_proj[i] = {u, v, i};
-                valid_points[i] = true;
-            }
-        }
+        if (p.z() <= 0) continue;
+        int u = (int) std::round(fx * p.x() / p.z() + cx);
+        int v = (int) std::round(fy * p.y() / p.z() + cy);
+        if ((unsigned) u >= (unsigned) rgb.cols || (unsigned) v >= (unsigned) rgb.rows) continue;
+        proj.push_back({u, v, i});
     }
-    
-    // 第二步：收集有效的投影点（串行，但很快）
-    proj.reserve(num_points / 4);  // 估算容量
-    for (int i = 0; i < num_points; ++i) {
-        if (valid_points[i]) {
-            proj.push_back(temp_proj[i]);
-        }
-    }
-    auto t_proj_end = std::chrono::steady_clock::now();
-    double proj_ms = std::chrono::duration<double, std::milli>(t_proj_end - t_proj_start).count();
-    spdlog::info("点云投影并行计算完成：{} 个点 -> {} 个有效投影，耗时 {:.2f} ms", num_points, proj.size(), proj_ms);
 
     results.clear();
     results.reserve(rect_and_mid.size());
