@@ -51,9 +51,7 @@ add_library(yzx_vision_zzb SHARED
         src/mylibrary.cpp
         src/LanxinCamera.cpp
         src/MaskRCNNRunnerGPU.cpp
-        src/FusionGeometry.cpp
-        src/BoxPosePipeline.cpp
-)
+        src/FusionGeometry.cpp)
 
 target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(yzx_vision_zzb PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lanxin/include)

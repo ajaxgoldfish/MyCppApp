@@ -5,8 +5,6 @@
 #include <open3d/Open3D.h>
 #include <filesystem>
 #include <spdlog/spdlog.h>
-#include "BoxPosePipeline.h"
-#include "BoxPosePipeline.h"
 #include <opencv2/opencv.hpp>
 #include <open3d/Open3D.h>
 #include <spdlog/spdlog.h>
@@ -16,7 +14,6 @@
 #include <vector>
 #include <string>
 #include "LanxinCamera.h"
-#include "BoxPosePipeline.h"
 #include <nlohmann/json.hpp>
 #include <open3d/io/PointCloudIO.h>
 
