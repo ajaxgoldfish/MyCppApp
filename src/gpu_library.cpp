@@ -618,9 +618,9 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
 
                     cv::Mat p_w_h = T_wc * cv::Mat(p_cam_re_mm);
                     cv::Point3f p_w_m(
-                        p_w_h.at<float>(0) / 1000.0f,
-                        p_w_h.at<float>(1) / 1000.0f,
-                        p_w_h.at<float>(2) / 1000.0f
+                        p_w_h.at<float>(0),
+                        p_w_h.at<float>(1),
+                        p_w_h.at<float>(2)
                     );
 
                     auto reorder_point = [](const cv::Point3f &p)-> cv::Vec4f {
@@ -784,15 +784,16 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     for (int i = 0; i < n_write; ++i) {
         const LocalBoxPoseResult &src = results[i];
         ::zzb::Box &dst = boxArr[i];
-        
+
+        dst.id= src.id;
         // 坐标（米）
         dst.x = static_cast<double>(src.xyz_m.x);
         dst.y = static_cast<double>(src.xyz_m.y);
         dst.z = static_cast<double>(src.xyz_m.z);
 
         // 尺寸（米）
-        dst.width = static_cast<double>(src.width_m);
-        dst.height = static_cast<double>(src.height_m);
+        dst.width = static_cast<double>(src.width_m*1000);
+        dst.height = static_cast<double>(src.height_m*1000);
 
         // 角度（度）：W、P、R → angle_a、angle_b、angle_c
         dst.angle_a = static_cast<double>(src.wpr_deg[0]);
