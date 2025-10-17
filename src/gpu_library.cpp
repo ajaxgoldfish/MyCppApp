@@ -122,6 +122,15 @@ int bs_yzx_init(const bool isDebug) {
             Ort::SessionOptions so;
             so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
+            // 添加CUDA ExecutionProvider
+            OrtCUDAProviderOptions cuda_options;
+            cuda_options.device_id = 0;  // 使用GPU 0
+            cuda_options.arena_extend_strategy = 0;
+            cuda_options.gpu_mem_limit = SIZE_MAX;
+            cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+            cuda_options.do_copy_in_default_stream = 1;
+            so.AppendExecutionProvider_CUDA(cuda_options);
+
             std::wstring model_path_wide(g_model_path.begin(), g_model_path.end());
             g_session = std::make_unique<Ort::Session>(*g_env, model_path_wide.c_str(), so);
             
@@ -238,7 +247,8 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     cv::Mat blob;
     cv::dnn::blobFromImage(rgb_converted, blob, 1.0, cv::Size(), {}, false, false, CV_32F);
     std::vector<int64_t> ishape = {1, 3, blob.size[2], blob.size[3]};
-    Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    // 使用CUDA内存进行GPU推理
+    Ort::MemoryInfo mi = Ort::MemoryInfo("Cuda", OrtAllocatorType::OrtArenaAllocator, 0, OrtMemTypeDefault);
     Ort::Value input = Ort::Value::CreateTensor<float>(
         mi, reinterpret_cast<float *>(blob.data), static_cast<size_t>(blob.total()), ishape.data(), ishape.size());
     const char *in_names[] = {g_in_name.c_str()};
