@@ -247,8 +247,8 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
     cv::Mat blob;
     cv::dnn::blobFromImage(rgb_converted, blob, 1.0, cv::Size(), {}, false, false, CV_32F);
     std::vector<int64_t> ishape = {1, 3, blob.size[2], blob.size[3]};
-    // 使用CUDA内存进行GPU推理
-    Ort::MemoryInfo mi = Ort::MemoryInfo("Cuda", OrtAllocatorType::OrtArenaAllocator, 0, OrtMemTypeDefault);
+    // 使用CPU内存创建tensor，ONNX Runtime会自动将数据传输到GPU进行推理
+    Ort::MemoryInfo mi = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     Ort::Value input = Ort::Value::CreateTensor<float>(
         mi, reinterpret_cast<float *>(blob.data), static_cast<size_t>(blob.total()), ishape.data(), ishape.size());
     const char *in_names[] = {g_in_name.c_str()};
