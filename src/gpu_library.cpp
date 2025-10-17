@@ -20,8 +20,8 @@ namespace fs = std::filesystem;
 namespace {
     std::string g_model_path;
     std::string g_calib_path;
-    float g_score_thr = 0.8f;
-    float g_mask_thr = 0.6f;
+    float g_score_thr = 0.7f;
+    float g_mask_thr = 0.5f;
     bool g_paint_masks_on_vis = true;
 
     // FusionGeometry 静态变量（原来的类成员变量）
