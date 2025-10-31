@@ -67,3 +67,33 @@ target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${PROJECT_SOURCE_DIR}/third_par
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swresample.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swscale.lib)
 target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-gpu/lib/onnxruntime.lib)
+
+
+# 测试 GPU DLL 的可执行文件
+add_executable(test_gpu_dll src/test_gpu_dll.cpp)
+
+
+target_include_directories(test_gpu_dll PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(test_gpu_dll PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lanxin/include)
+target_include_directories(test_gpu_dll PRIVATE ${CMAKE_SOURCE_DIR}/third_party/onnxruntime-gpu/include)
+target_include_directories(test_gpu_dll PRIVATE ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/include)
+
+target_link_libraries(test_gpu_dll PRIVATE yzx_vision_zzb_gpu)
+target_link_libraries(test_gpu_dll PRIVATE ${OpenCV_LIBS})
+target_link_libraries(test_gpu_dll PRIVATE ${OpenCV_LIBS})
+target_link_libraries(test_gpu_dll PRIVATE spdlog::spdlog)
+target_link_libraries(test_gpu_dll PRIVATE ${PCL_LIBRARIES})
+target_link_libraries(test_gpu_dll PRIVATE Open3D::Open3D)
+target_link_libraries(test_gpu_dll PRIVATE ${PROJECT_SOURCE_DIR}/third_party/lanxin/lib/win_x64/LxCameraApi.lib)
+target_link_libraries(test_gpu_dll PRIVATE ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avcodec.lib
+        ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avdevice.lib
+        ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avfilter.lib
+        ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avformat.lib
+        ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avutil.lib
+        ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swresample.lib
+        ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swscale.lib)
+target_link_libraries(test_gpu_dll PRIVATE ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-gpu/lib/onnxruntime.lib)
+
+set_target_properties(test_gpu_dll PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
