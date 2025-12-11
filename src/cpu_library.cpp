@@ -160,81 +160,81 @@ int bs_yzx_init(const bool is_debug) {
     return 0;
 }
 
-// ------------------------------------------------------------------------------------------------
-// 辅助函数: 数据预处理 (Preprocessing)
-// ------------------------------------------------------------------------------------------------
+    // ------------------------------------------------------------------------------------------------
+    // 辅助函数: 数据预处理 (Preprocessing)
+    // ------------------------------------------------------------------------------------------------
 
-/**
- * @brief 执行 ONNX Runtime 推理并解析结果
- */
-static std::vector<cv::Mat1b> run_inference_and_get_masks(const cv::Mat& image_rgb) {
-    std::vector<cv::Mat1b> detected_masks;
-    if (image_rgb.empty()) return detected_masks;
+    /**
+     * @brief 执行 ONNX Runtime 推理并解析结果
+     */
+    static std::vector<cv::Mat1b> run_inference_and_get_masks(const cv::Mat& image_rgb) {
+        std::vector<cv::Mat1b> detected_masks;
+        if (image_rgb.empty()) return detected_masks;
 
-    cv::Mat rgb_float;
-    cv::cvtColor(image_rgb, rgb_float, cv::COLOR_BGR2RGB);
-    rgb_float.convertTo(rgb_float, CV_32F);
-    
-    // Normalize
-    static const cv::Scalar kMean(123.675, 116.28, 103.53);
-    static const cv::Scalar kStdv(58.395, 57.12, 57.375);
-    cv::subtract(rgb_float, kMean, rgb_float);
-    cv::divide(rgb_float, kStdv, rgb_float);
-    
-    cv::Mat blob;
-    cv::dnn::blobFromImage(rgb_float, blob, 1.0, cv::Size(), {}, false, false, CV_32F);
-    
-    std::vector<int64_t> input_shape = {1, 3, blob.size[2], blob.size[3]};
-    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-        mem_info, reinterpret_cast<float *>(blob.data), static_cast<size_t>(blob.total()), input_shape.data(), input_shape.size());
-    
-    const char *input_names[] = {g_input_name.c_str()};
-    auto ort_outputs = g_session->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1,
-                          g_output_names_ptr.data(), g_output_names_ptr.size());
-    
-    if (ort_outputs.size() < 3) return detected_masks;
+        cv::Mat rgb_float;
+        cv::cvtColor(image_rgb, rgb_float, cv::COLOR_BGR2RGB);
+        rgb_float.convertTo(rgb_float, CV_32F);
+        
+        // 归一化参数 (Normalize)
+        static const cv::Scalar kMean(123.675, 116.28, 103.53);
+        static const cv::Scalar kStdv(58.395, 57.12, 57.375);
+        cv::subtract(rgb_float, kMean, rgb_float);
+        cv::divide(rgb_float, kStdv, rgb_float);
+        
+        cv::Mat blob;
+        cv::dnn::blobFromImage(rgb_float, blob, 1.0, cv::Size(), {}, false, false, CV_32F);
+        
+        std::vector<int64_t> input_shape = {1, 3, blob.size[2], blob.size[3]};
+        Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+            mem_info, reinterpret_cast<float *>(blob.data), static_cast<size_t>(blob.total()), input_shape.data(), input_shape.size());
+        
+        const char *input_names[] = {g_input_name.c_str()};
+        auto ort_outputs = g_session->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1,
+                              g_output_names_ptr.data(), g_output_names_ptr.size());
+        
+        if (ort_outputs.size() < 3) return detected_masks;
 
-    // Parse outputs
-    auto shape_dets = ort_outputs[0].GetTensorTypeAndShapeInfo().GetShape();
-    auto shape_masks = ort_outputs[2].GetTensorTypeAndShapeInfo().GetShape();
-    int64_t num_detections = shape_dets[1];
-    int mask_h = (int) shape_masks[2];
-    int mask_w = (int) shape_masks[3];
-    
-    const float *det_data = ort_outputs[0].GetTensorData<float>();
-    const float *mask_tensor_data = ort_outputs[2].GetTensorData<float>();
+        // 解析输出 (Parse outputs)
+        auto shape_dets = ort_outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+        auto shape_masks = ort_outputs[2].GetTensorTypeAndShapeInfo().GetShape();
+        int64_t num_detections = shape_dets[1];
+        int mask_h = (int) shape_masks[2];
+        int mask_w = (int) shape_masks[3];
+        
+        const float *det_data = ort_outputs[0].GetTensorData<float>();
+        const float *mask_tensor_data = ort_outputs[2].GetTensorData<float>();
 
-    detected_masks.reserve((size_t)num_detections);
-    for (int64_t i = 0; i < num_detections; ++i) {
-        const float *curr_det = det_data + i * 5;
-        float score = curr_det[4];
-        if (score < g_score_threshold) continue;
-        
-        int x1 = std::clamp((int)std::lround(curr_det[0]), 0, image_rgb.cols - 1);
-        int y1 = std::clamp((int)std::lround(curr_det[1]), 0, image_rgb.rows - 1);
-        int x2 = std::clamp((int)std::lround(curr_det[2]), 0, image_rgb.cols - 1);
-        int y2 = std::clamp((int)std::lround(curr_det[3]), 0, image_rgb.rows - 1);
-        
-        cv::Rect roi_rect(x1, y1, std::max(1, x2 - x1), std::max(1, y2 - y1));
-        roi_rect &= cv::Rect(0, 0, image_rgb.cols, image_rgb.rows);
-        if (roi_rect.area() <= 0) continue;
-        
-        const float *curr_mask_ptr = mask_tensor_data + i * (mask_h * mask_w);
-        cv::Mat mask_float(mask_h, mask_w, CV_32F, const_cast<float *>(curr_mask_ptr));
-        cv::Mat mask_resized;
-        cv::resize(mask_float, mask_resized, roi_rect.size(), 0, 0, cv::INTER_LINEAR);
-        
-        cv::Mat1b mask_bin;
-        cv::compare(mask_resized, g_mask_threshold, mask_bin, cv::CMP_GT);
-        
-        cv::Mat1b full_mask(image_rgb.rows, image_rgb.cols, (uchar)0);
-        full_mask(roi_rect).setTo(255, mask_bin);
-        detected_masks.emplace_back(std::move(full_mask));
+        detected_masks.reserve((size_t)num_detections);
+        for (int64_t i = 0; i < num_detections; ++i) {
+            const float *curr_det = det_data + i * 5;
+            float score = curr_det[4];
+            if (score < g_score_threshold) continue;
+            
+            int x1 = std::clamp((int)std::lround(curr_det[0]), 0, image_rgb.cols - 1);
+            int y1 = std::clamp((int)std::lround(curr_det[1]), 0, image_rgb.rows - 1);
+            int x2 = std::clamp((int)std::lround(curr_det[2]), 0, image_rgb.cols - 1);
+            int y2 = std::clamp((int)std::lround(curr_det[3]), 0, image_rgb.rows - 1);
+            
+            cv::Rect roi_rect(x1, y1, std::max(1, x2 - x1), std::max(1, y2 - y1));
+            roi_rect &= cv::Rect(0, 0, image_rgb.cols, image_rgb.rows);
+            if (roi_rect.area() <= 0) continue;
+            
+            const float *curr_mask_ptr = mask_tensor_data + i * (mask_h * mask_w);
+            cv::Mat mask_float(mask_h, mask_w, CV_32F, const_cast<float *>(curr_mask_ptr));
+            cv::Mat mask_resized;
+            cv::resize(mask_float, mask_resized, roi_rect.size(), 0, 0, cv::INTER_LINEAR);
+            
+            cv::Mat1b mask_bin;
+            cv::compare(mask_resized, g_mask_threshold, mask_bin, cv::CMP_GT);
+            
+            cv::Mat1b full_mask(image_rgb.rows, image_rgb.cols, (uchar)0);
+            full_mask(roi_rect).setTo(255, mask_bin);
+            detected_masks.emplace_back(std::move(full_mask));
+        }
+
+        return detected_masks;
     }
-
-    return detected_masks;
-}
 
 /**
  * @brief 将点云投影到图像平面
@@ -277,7 +277,7 @@ static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& 
     cv::RotatedRect obb = cv::minAreaRect(non_zero_pts);
     if (obb.size.width <= 0 || obb.size.height <= 0) return std::nullopt;
     
-    // Find bottom edge mid point
+    // 找到底边中点 (Find bottom edge mid point)
     cv::Point2f pts_obb[4];
     obb.points(pts_obb);
     
@@ -295,7 +295,7 @@ static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& 
     DetectionResult2D res;
     res.obb = obb;
     res.bottom_mid_px = (pts_obb[idx1] + pts_obb[idx2]) * 0.5f;
-    res.mask = mask; // Copy ref
+    res.mask = mask; // 拷贝引用
     return res;
 }
 
@@ -311,7 +311,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     const std::vector<ProjectionMap>& proj_map,
     const open3d::geometry::PointCloud& global_pc) 
 {
-    // 1. Filter points inside RotatedRect
+    // 1. 过滤旋转矩形框内的点 (Filter points inside RotatedRect)
     std::vector<Eigen::Vector3d> points_in_box;
     points_in_box.reserve(4096);
     
@@ -324,7 +324,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     for (const auto &proj : proj_map) {
         const float dx = (float)proj.u - center_x;
         const float dy = (float)proj.v - center_y;
-        // Rotate to local frame
+        // 旋转到局部坐标系 (Rotate to local frame)
         const float local_x = dx * cos_a + dy * sin_a;
         const float local_y = -dx * sin_a + dy * cos_a;
         
@@ -335,7 +335,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
 
     if (points_in_box.size() < 30) return std::nullopt;
 
-    // 2. Identify key pixels (Base edge + Third point)
+    // 2. 识别关键像素点：底边 + 第三点 (Identify key pixels: Base edge + Third point)
     cv::Point2f base_pt_a, base_pt_b, third_pt;
     {
         cv::Point2f rect_pts[4];
@@ -365,7 +365,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
         third_pt = (cv::norm(q0 - base_pt_a) <= cv::norm(q1 - base_pt_a)) ? q0 : q1;
     }
 
-    // 3. Pixel to Ray
+    // 3. 像素转射线 (Pixel to Ray)
     auto get_ray_dir = [](const cv::Point2f &px) -> Eigen::Vector3d {
         cv::Vec3d vec(
             g_mat_k_inv.at<double>(0, 0) * px.x + g_mat_k_inv.at<double>(0, 1) * px.y + g_mat_k_inv.at<double>(0, 2),
@@ -378,7 +378,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     Eigen::Vector3d ray_2 = get_ray_dir(base_pt_b);
     Eigen::Vector3d ray_3 = get_ray_dir(third_pt);
 
-    // 4. RANSAC Plane Fitting
+    // 4. RANSAC 平面拟合 (RANSAC Plane Fitting)
     auto temp_cloud = std::make_shared<open3d::geometry::PointCloud>();
     temp_cloud->points_.assign(points_in_box.begin(), points_in_box.end());
     
@@ -394,9 +394,9 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     if (norm_l < 1e-9) return std::nullopt;
 
     n /= norm_l; d /= norm_l;
-    if (n.z() < 0) { n = -n; d = -d; } // Align normal
+    if (n.z() < 0) { n = -n; d = -d; } // 对齐法向量方向 (Align normal)
 
-    // 5. Ray-Plane Intersection
+    // 5. 射线与平面求交 (Ray-Plane Intersection)
     auto get_intersection = [&](const Eigen::Vector3d& dir, double& out_t) -> bool {
         double nd = n.dot(dir);
         if (std::abs(nd) < 1e-8) return false;
@@ -421,12 +421,12 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     edge_vec /= edge_len;
     if (edge_vec.cross(n).z() < 0) edge_vec = -edge_vec;
 
-    // 6. Coordinate Transformation (Camera -> World)
+    // 6. 坐标系转换：相机 -> 世界 (Coordinate Transformation: Camera -> World)
     cv::Vec3f normal_cam = { (float)n.x(), (float)n.y(), (float)n.z() };
     cv::Vec3f dir_cam = { (float)edge_vec.x(), (float)edge_vec.y(), (float)edge_vec.z() };
     cv::Point3f center_cam = { (float)M.x(), (float)M.y(), (float)M.z() };
 
-    // Transform Rotation part
+    // 变换旋转部分 (Transform Rotation part)
     cv::Mat mat_r_wc = g_mat_twc(cv::Rect(0, 0, 3, 3));
     cv::Mat normal_world_mat = mat_r_wc * cv::Mat(normal_cam);
     cv::Mat dir_world_mat = mat_r_wc * cv::Mat(dir_cam);
@@ -434,9 +434,9 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     cv::Point3f normal_world(normal_world_mat.at<float>(0), normal_world_mat.at<float>(1), normal_world_mat.at<float>(2));
     cv::Point3f dir_world(dir_world_mat.at<float>(0), dir_world_mat.at<float>(1), dir_world_mat.at<float>(2));
 
-    // Transform Position part
+    // 变换位置部分 (Transform Position part)
     auto transform_point_to_world = [](const cv::Point3f &p) -> cv::Point3f {
-        cv::Vec4f p_homo(p.x * 1000.0f, p.y * 1000.0f, p.z * 1000.0f, 1.0f); // Convert to mm first
+        cv::Vec4f p_homo(p.x * 1000.0f, p.y * 1000.0f, p.z * 1000.0f, 1.0f); // 先转换为 mm (Convert to mm first)
         cv::Mat res = g_mat_twc * cv::Mat(p_homo);
         return cv::Point3f(res.at<float>(0)/1000.f, res.at<float>(1)/1000.f, res.at<float>(2)/1000.f);
     };
@@ -446,7 +446,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     cv::Point3f p2_wm = transform_point_to_world({(float)P2.x(), (float)P2.y(), (float)P2.z()});
     cv::Point3f p3_wm = transform_point_to_world({(float)P3.x(), (float)P3.y(), (float)P3.z()});
 
-    // 7. Calculate Dimensions
+    // 7. 计算尺寸 (Calculate Dimensions)
     cv::Point3f vec_w = p2_wm - p1_wm;
     cv::Point3f vec_h = p3_wm - p1_wm;
     float w_val = std::sqrt(vec_w.dot(vec_w));
@@ -454,7 +454,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     
     if (!std::isfinite(w_val) || !std::isfinite(h_val)) return std::nullopt;
 
-    // 8. Construct Rotation Matrix
+    // 8. 构建旋转矩阵 (Construct Rotation Matrix)
     auto normalize = [](cv::Point3f v) -> cv::Point3f {
         float l = std::sqrt(v.dot(v));
         return (l < 1e-9f) ? cv::Point3f(0,0,0) : v * (1.0f/l);
@@ -549,7 +549,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
 
     auto time_start = std::chrono::steady_clock::now();
 
-    // 1. Data Loading
+    // 1. 数据加载 (Data Loading)
     const fs::path case_dir = fs::path(g_root_output_dir) / std::to_string(task_id);
     if (!fs::exists(case_dir)) {
         spdlog::error("Data directory does not exist: {}", case_dir.string());
@@ -570,17 +570,17 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
         return -23;
     }
 
-    // 2. Inference
+    // 2. 推理检测 (Inference)
     auto detected_masks = run_inference_and_get_masks(image_rgb);
     
-    // 3. Precompute Projection
+    // 3. 预计算投影 (Precompute Projection)
     auto proj_map = project_point_cloud_to_image(point_cloud, image_rgb.size());
 
-    // 4. Main Processing Loop
+    // 4. 主处理循环 (Main Processing Loop)
     std::vector<LocalBoxPoseResult> results;
     cv::Mat vis_image = image_rgb.clone(); // Basic visualization (e.g. masks) can be added here if needed
     
-    // Draw masks on visualization image if needed
+    // 如果需要，在可视化图像上绘制掩码
     if (g_paint_masks_on_vis) {
         const cv::Scalar kVisColor(0, 255, 0);
         for (const auto& mask : detected_masks) {
@@ -609,10 +609,10 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
         }
     }
 
-    // 5. Visualize Results
+    // 5. 可视化结果 (Visualize Results)
     visualize_results(vis_image, results);
 
-    // 6. Output
+    // 6. 结果输出 (Output)
     const fs::path vis_out_path = case_dir / "vis_on_orig.jpg";
     cv::imwrite(vis_out_path.string(), vis_image);
 
@@ -634,7 +634,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
         dst.rw7 = rot(2,0); dst.rw8 = rot(2,1); dst.rw9 = rot(2,2);
     }
 
-    // Write JSON (Simplified for brevity)
+    // 写入 JSON (Simplified for brevity)
     json json_root;
     json_root["taskId"] = task_id;
     json_root["elapsed_ms"] = elapsed_ms;
