@@ -36,14 +36,14 @@ namespace {
     // 本地计算结果结构体
     struct LocalBoxPoseResult {
         int id = -1;
-        cv::Point3f xyz_m{};          // 中心点坐标 (米)
+        cv::Point3f xyz_mm{};         // 中心点坐标 (毫米)
         cv::Vec3f wpr_deg{};          // 欧拉角 (度)
-        float width_m = 0.f;          // 宽度 (米)
-        float height_m = 0.f;         // 高度 (米)
+        float width_mm = 0.f;         // 宽度 (毫米)
+        float height_mm = 0.f;        // 高度 (毫米)
         cv::RotatedRect obb;          // 2D 旋转矩形
         cv::Point2f bottom_mid_px{};  // 底边中点 (像素)
-        cv::Point3f p1_w_m{}, p2_w_m{}, p3_w_m{}; // 关键点 (世界坐标系)
-        Eigen::Matrix3d rotation_matrix_world;    // 旋转矩阵 (世界坐标系)
+        cv::Point3f p1_w_mm{}, p2_w_mm{}, p3_w_mm{}; // 关键点 (世界坐标系, 毫米)
+        Eigen::Matrix3d rotation_matrix_world;       // 旋转矩阵 (世界坐标系)
     };
 
     // ==========================================
@@ -435,20 +435,22 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     cv::Point3f dir_world(dir_world_mat.at<float>(0), dir_world_mat.at<float>(1), dir_world_mat.at<float>(2));
 
     // 变换位置部分 (Transform Position part)
-    auto transform_point_to_world = [](const cv::Point3f &p) -> cv::Point3f {
-        cv::Vec4f p_homo(p.x * 1000.0f, p.y * 1000.0f, p.z * 1000.0f, 1.0f); // 先转换为 mm (Convert to mm first)
+    // 注意：输入是米，输出转换为毫米
+    auto transform_point_to_world_mm = [](const cv::Point3f &p) -> cv::Point3f {
+        cv::Vec4f p_homo(p.x * 1000.0f, p.y * 1000.0f, p.z * 1000.0f, 1.0f); // Convert to mm first
         cv::Mat res = g_mat_twc * cv::Mat(p_homo);
-        return cv::Point3f(res.at<float>(0)/1000.f, res.at<float>(1)/1000.f, res.at<float>(2)/1000.f);
+        // 不再除以1000，保持毫米单位
+        return cv::Point3f(res.at<float>(0), res.at<float>(1), res.at<float>(2));
     };
 
-    cv::Point3f pos_world_m = transform_point_to_world(center_cam);
-    cv::Point3f p1_wm = transform_point_to_world({(float)P1.x(), (float)P1.y(), (float)P1.z()});
-    cv::Point3f p2_wm = transform_point_to_world({(float)P2.x(), (float)P2.y(), (float)P2.z()});
-    cv::Point3f p3_wm = transform_point_to_world({(float)P3.x(), (float)P3.y(), (float)P3.z()});
+    cv::Point3f pos_world_mm = transform_point_to_world_mm(center_cam);
+    cv::Point3f p1_w_mm = transform_point_to_world_mm({(float)P1.x(), (float)P1.y(), (float)P1.z()});
+    cv::Point3f p2_w_mm = transform_point_to_world_mm({(float)P2.x(), (float)P2.y(), (float)P2.z()});
+    cv::Point3f p3_w_mm = transform_point_to_world_mm({(float)P3.x(), (float)P3.y(), (float)P3.z()});
 
-    // 7. 计算尺寸 (Calculate Dimensions)
-    cv::Point3f vec_w = p2_wm - p1_wm;
-    cv::Point3f vec_h = p3_wm - p1_wm;
+    // 7. 计算尺寸 (Calculate Dimensions in mm)
+    cv::Point3f vec_w = p2_w_mm - p1_w_mm;
+    cv::Point3f vec_h = p3_w_mm - p1_w_mm;
     float w_val = std::sqrt(vec_w.dot(vec_w));
     float h_val = std::sqrt(vec_h.dot(vec_h));
     
@@ -485,15 +487,15 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     auto rad2deg = [](double v) { return v * 180.0 / 3.14159265358979323846; };
 
     LocalBoxPoseResult res;
-    res.xyz_m = pos_world_m;
+    res.xyz_mm = pos_world_mm;
     res.wpr_deg = cv::Vec3f((float)rad2deg(roll), (float)rad2deg(pitch), (float)rad2deg(yaw));
-    res.width_m = w_val;
-    res.height_m = h_val;
+    res.width_mm = w_val;
+    res.height_mm = h_val;
     res.obb = det_2d.obb;
     res.bottom_mid_px = det_2d.bottom_mid_px;
-    res.p1_w_m = p1_wm;
-    res.p2_w_m = p2_wm;
-    res.p3_w_m = p3_wm;
+    res.p1_w_mm = p1_w_mm;
+    res.p2_w_mm = p2_w_mm;
+    res.p3_w_mm = p3_w_mm;
     res.rotation_matrix_world = rotation_matrix;
     return res;
 }
@@ -514,13 +516,13 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
         std::array<std::string, 8> info_lines;
         std::ostringstream oss;
         oss.str(""); oss << "#" << r.id; info_lines[0] = oss.str();
-        oss.str(""); oss << "x=" << std::fixed << std::setprecision(3) << r.xyz_m.x; info_lines[1] = oss.str();
-        oss.str(""); oss << "y=" << std::fixed << std::setprecision(3) << r.xyz_m.y; info_lines[2] = oss.str();
-        oss.str(""); oss << "z=" << std::fixed << std::setprecision(3) << r.xyz_m.z; info_lines[3] = oss.str();
+        oss.str(""); oss << "x=" << std::fixed << std::setprecision(1) << r.xyz_mm.x; info_lines[1] = oss.str();
+        oss.str(""); oss << "y=" << std::fixed << std::setprecision(1) << r.xyz_mm.y; info_lines[2] = oss.str();
+        oss.str(""); oss << "z=" << std::fixed << std::setprecision(1) << r.xyz_mm.z; info_lines[3] = oss.str();
         oss.str(""); oss << "W=" << std::fixed << std::setprecision(1) << r.wpr_deg[0]; info_lines[4] = oss.str();
         oss.str(""); oss << "P=" << std::fixed << std::setprecision(1) << r.wpr_deg[1]; info_lines[5] = oss.str();
         oss.str(""); oss << "R=" << std::fixed << std::setprecision(1) << r.wpr_deg[2]; info_lines[6] = oss.str();
-        oss.str(""); oss << std::fixed << std::setprecision(1) << r.width_m * 1000 << "," << r.height_m * 1000; info_lines[7] = oss.str();
+        oss.str(""); oss << std::fixed << std::setprecision(1) << r.width_mm << "," << r.height_mm; info_lines[7] = oss.str();
 
         int base_line = 0;
         int total_h = 0;
@@ -625,8 +627,15 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
     for (int i = 0; i < num_to_write; ++i) {
         const auto &src = results[i];
         auto &dst = box_array[i];
-        dst.x = src.xyz_m.x; dst.y = src.xyz_m.y; dst.z = src.xyz_m.z;
-        dst.width = src.width_m; dst.height = src.height_m;
+        
+        // 直接赋值，单位已是毫米 (Direct assignment, unit is already mm)
+        dst.x = src.xyz_mm.x; 
+        dst.y = src.xyz_mm.y; 
+        dst.z = src.xyz_mm.z;
+        
+        dst.width = src.width_mm; 
+        dst.height = src.height_mm;
+        
         dst.angle_a = src.wpr_deg[0]; dst.angle_b = src.wpr_deg[1]; dst.angle_c = src.wpr_deg[2];
         const auto &rot = src.rotation_matrix_world;
         dst.rw1 = rot(0,0); dst.rw2 = rot(0,1); dst.rw3 = rot(0,2);
