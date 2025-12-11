@@ -571,13 +571,13 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
                 if (!planeComputed) {
                     spdlog::info("[#{}] Plane/intersection solving failed", i);
                 } else {
-                    cv::Vec3f n_cam_re{n_cam[2], -n_cam[0], -n_cam[1]};
-                    cv::Vec3f line_cam_re{line_cam[2], -line_cam[0], -line_cam[1]};
+                    cv::Vec3f n_cam_re = n_cam;
+                    cv::Vec3f line_cam_re = line_cam;
 
                     cv::Vec4f p_cam_re_mm(
+                        xyz_cam.x * 1000.0f,
+                        xyz_cam.y * 1000.0f,
                         xyz_cam.z * 1000.0f,
-                        -xyz_cam.x * 1000.0f,
-                        -xyz_cam.y * 1000.0f,
                         1.0f
                     );
                     cv::Mat T_wc = g_Twc.clone();
@@ -596,7 +596,7 @@ int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]) {
                     );
 
                     auto reorder_point = [](const cv::Point3f &p)-> cv::Vec4f {
-                        return cv::Vec4f(p.z * 1000.0f, -p.x * 1000.0f, -p.y * 1000.0f, 1.0f);
+                        return cv::Vec4f(p.x * 1000.0f, p.y * 1000.0f, p.z * 1000.0f, 1.0f);
                     };
                     cv::Mat p1_w_h = T_wc * cv::Mat(reorder_point(xyz1_cam));
                     cv::Mat p2_w_h = T_wc * cv::Mat(reorder_point(xyz2_cam));
