@@ -28,7 +28,8 @@ int main() {
     int taskId = 9999;  // 可以改成你想要的任务ID
     
     std::cout << "开始拍照和检测（taskId=" << taskId << "）..." << std::endl;
-    int detection_result = bs_yzx_object_detection_lanxin(taskId, boxes);
+    // 传入 Y 轴边界值
+    int detection_result = bs_yzx_object_detection_lanxin(taskId, boxes, 1000.0f, -1200.0f);
     
     if (detection_result >= 0) {
         std::cout << "✓ 拍照和检测成功！检测到 " << detection_result << " 个物体" << std::endl;

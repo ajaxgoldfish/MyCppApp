@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<opencv_storage>
+    <!-- 运行模式: 0 = 本地文件模式, 1 = 相机在线模式 -->
+    <RunMode>0</RunMode>
+    
+    <!-- 计算设备: 1 = CPU, 2 = GPU -->
+    <DeviceType>1</DeviceType>
+
+    <extrinsicRGB type_id="opencv-matrix">
+        <rows>4</rows>
+        <cols>4</cols>
+        <dt>f</dt>
+        <data>
+            1.008455967220282 -0.003753129316858968 0.01427220656608045 -133.2885709091783
+            0.008806578989014713 0.9968718081729976 0.0120209612998089 -471.0830886495563
+            0.004994975666173296 -0.02103599507793568 0.991298373196994 553.0426924853518
+            0 0 0 1
+        </data>
+    </extrinsicRGB>
+   <intrinsicRGB type_id="opencv-matrix">
+        <rows>3</rows>
+        <cols>3</cols>
+        <dt>f</dt>
+        <data>
+            1068.950195313 0 949.290527344
+            0  1068.063842773 529.840393066
+            0 0 1
+        </data>
+    </intrinsicRGB>
+</opencv_storage>
+

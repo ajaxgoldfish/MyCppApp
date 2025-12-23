@@ -604,7 +604,7 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
 }
 
 
-int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
+int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_left_mm, float y_right_mm) {
     if (!g_is_pipeline_ready) return -10;
     // 相机模式下必须有相机
     if (g_run_mode == 1 && (!g_camera || !g_camera->isOpened())) return -11;
@@ -708,8 +708,8 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
 
     // [新增] 绘制世界坐标系 Y 边界辅助线 (Y=1000, Y=-1200)
     if (!g_mat_twc.empty() && !g_mat_k.empty()) {
-        float y_left_mm = 1000.0f;
-        float y_right_mm = -1200.0f;
+        // float y_left_mm = 1000.0f;  <-- 从参数传入，不再写死
+        // float y_right_mm = -1200.0f; <-- 从参数传入，不再写死
         
         // 1. 计算 World -> Camera 变换矩阵 (T_cw = T_wc^-1)
         // g_mat_twc 是 Camera -> World (在 solve_pose 中: res = g_mat_twc * p_camera)
@@ -760,8 +760,8 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
             }
         };
 
-        draw_v_line(u_l, cv::Scalar(255, 0, 0), "Y=1000");   // 蓝色
-        draw_v_line(u_r, cv::Scalar(0, 0, 255), "Y=-1200");  // 红色
+        draw_v_line(u_l, cv::Scalar(255, 0, 0), "Y=" + std::to_string((int)y_left_mm));   // 蓝色
+        draw_v_line(u_r, cv::Scalar(0, 0, 255), "Y=" + std::to_string((int)y_right_mm));  // 红色
     }
 
     // 6. 结果输出 (Output)
