@@ -706,6 +706,64 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
     // 5. 可视化结果 (Visualize Results)
     visualize_results(vis_image, results);
 
+    // [新增] 绘制世界坐标系 Y 边界辅助线 (Y=1000, Y=-1200)
+    if (!g_mat_twc.empty() && !g_mat_k.empty()) {
+        float y_left_mm = 1000.0f;
+        float y_right_mm = -1200.0f;
+        
+        // 1. 计算 World -> Camera 变换矩阵 (T_cw = T_wc^-1)
+        // g_mat_twc 是 Camera -> World (在 solve_pose 中: res = g_mat_twc * p_camera)
+        cv::Mat mat_twc_64;
+        g_mat_twc.convertTo(mat_twc_64, CV_64F);
+        cv::Mat mat_tcw = mat_twc_64.inv();
+
+        // 2. 确定参考点：取图像中心对应的一条射线上的点
+        // 假设在深度 Z_cam = 2000mm 处寻找对应的世界坐标 Xw 和 Zw
+        double cx = g_mat_k.at<double>(0, 2);
+        // double cy = g_mat_k.at<double>(1, 2);
+        double fx = g_mat_k.at<double>(0, 0);
+        // double fy = g_mat_k.at<double>(1, 1);
+        
+        double z_ref_mm = 2000.0; // 2米参考深度
+        // 图像中心点对应的归一化相机坐标是 (0, 0, 1) * z_ref
+        cv::Mat p_cam_center = (cv::Mat_<double>(4, 1) << 0, 0, z_ref_mm, 1.0);
+        
+        // 转到世界坐标系
+        cv::Mat p_world_center = mat_twc_64 * p_cam_center;
+        double xw = p_world_center.at<double>(0, 0);
+        double zw = p_world_center.at<double>(2, 0);
+        // double yw = p_world_center.at<double>(1, 0); // 这个值我们将用目标 Y 替换
+        
+        auto get_u_from_world_y = [&](double target_y) -> int {
+            // 构造目标世界坐标点 (保持 Xw, Zw 不变，修改 Yw)
+            cv::Mat p_w = (cv::Mat_<double>(4, 1) << xw, target_y, zw, 1.0);
+            
+            // 转回相机坐标
+            cv::Mat p_c = mat_tcw * p_w;
+            double z_c = p_c.at<double>(2, 0);
+            
+            // 防止除以零或投影到相机背面
+            if (z_c < 1.0) return -10000; 
+            
+            double x_c = p_c.at<double>(0, 0);
+            // 投影 u = fx * x / z + cx
+            return std::round(fx * x_c / z_c + cx);
+        };
+
+        int u_l = get_u_from_world_y(y_left_mm);
+        int u_r = get_u_from_world_y(y_right_mm);
+
+        auto draw_v_line = [&](int u, const cv::Scalar& color, const std::string& txt) {
+            if (u >= 0 && u < vis_image.cols) {
+                cv::line(vis_image, cv::Point(u, 0), cv::Point(u, vis_image.rows), color, 2);
+                cv::putText(vis_image, txt, cv::Point(u + 5, 60), cv::FONT_HERSHEY_SIMPLEX, 0.7, color, 2);
+            }
+        };
+
+        draw_v_line(u_l, cv::Scalar(255, 0, 0), "Y=1000");   // 蓝色
+        draw_v_line(u_r, cv::Scalar(0, 0, 255), "Y=-1200");  // 红色
+    }
+
     // 6. 结果输出 (Output)
     const fs::path vis_out_path = case_dir / "vis_on_orig.jpg";
     cv::imwrite(vis_out_path.string(), vis_image);
