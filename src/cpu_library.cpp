@@ -717,32 +717,23 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
         g_mat_twc.convertTo(mat_twc_64, CV_64F);
         cv::Mat mat_tcw = mat_twc_64.inv();
 
-        // 2. 确定参考点：取图像中心对应的一条射线上的点
-        // 假设在深度 Z_cam = 2000mm 处寻找对应的世界坐标 Xw 和 Zw
-        double cx = g_mat_k.at<double>(0, 2);
-        // double cy = g_mat_k.at<double>(1, 2);
+        // 2. 使用用户指定的固定世界坐标 X 和 Z
+        double fixed_xw = 2760.0;
+        double fixed_zw = 500.0;
+        
         double fx = g_mat_k.at<double>(0, 0);
-        // double fy = g_mat_k.at<double>(1, 1);
+        double cx = g_mat_k.at<double>(0, 2);
         
-        double z_ref_mm = 2000.0; // 2米参考深度
-        // 图像中心点对应的归一化相机坐标是 (0, 0, 1) * z_ref
-        cv::Mat p_cam_center = (cv::Mat_<double>(4, 1) << 0, 0, z_ref_mm, 1.0);
-        
-        // 转到世界坐标系
-        cv::Mat p_world_center = mat_twc_64 * p_cam_center;
-        double xw = p_world_center.at<double>(0, 0);
-        double zw = p_world_center.at<double>(2, 0);
-        // double yw = p_world_center.at<double>(1, 0); // 这个值我们将用目标 Y 替换
-        
-        auto get_u_from_world_y = [&](double target_y) -> int {
-            // 构造目标世界坐标点 (保持 Xw, Zw 不变，修改 Yw)
-            cv::Mat p_w = (cv::Mat_<double>(4, 1) << xw, target_y, zw, 1.0);
+        auto get_u_from_world_point = [&](double target_y) -> int {
+            // 构造目标世界坐标点 (X=2760, Y=target, Z=500)
+            cv::Mat p_w = (cv::Mat_<double>(4, 1) << fixed_xw, target_y, fixed_zw, 1.0);
             
-            // 转回相机坐标
+            // World -> Camera
             cv::Mat p_c = mat_tcw * p_w;
+            
             double z_c = p_c.at<double>(2, 0);
             
-            // 防止除以零或投影到相机背面
+            // 防止除以零或投影到相机背面 (z_c <= 0)
             if (z_c < 1.0) return -10000; 
             
             double x_c = p_c.at<double>(0, 0);
@@ -750,8 +741,8 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
             return std::round(fx * x_c / z_c + cx);
         };
 
-        int u_l = get_u_from_world_y(y_left_mm);
-        int u_r = get_u_from_world_y(y_right_mm);
+        int u_l = get_u_from_world_point(y_left_mm);
+        int u_r = get_u_from_world_point(y_right_mm);
 
         auto draw_v_line = [&](int u, const cv::Scalar& color, const std::string& txt) {
             if (u >= 0 && u < vis_image.cols) {
