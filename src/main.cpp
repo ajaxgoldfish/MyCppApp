@@ -19,6 +19,7 @@ int main() {
 
     // ====== 1) 初始化 CPU Library ======
     bool isDebug = true;  // 可以设置为 false 来减少调试信息
+    // 自动读取 config/params.xml 配置
     int init_result = bs_yzx_init(isDebug);
     if (init_result != 0) {
         spdlog::critical("bs_yzx_init 失败，错误码: {}", init_result);

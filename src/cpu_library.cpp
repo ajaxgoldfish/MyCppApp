@@ -3,6 +3,7 @@
 #endif
 
 #include "cpu_library.h"
+#include "LanxinCamera.h"
 #include <onnxruntime_cxx_api.h>
 #include <Eigen/Dense>
 #include <array>
@@ -11,6 +12,7 @@
 #include <opencv2/dnn.hpp>
 #include <algorithm>
 #include <optional>
+#include <fstream>
 
 using nlohmann::json;
 namespace fs = std::filesystem;
@@ -23,15 +25,23 @@ namespace {
     // ==========================================
     // 全局配置与资源 (Global Configuration)
     // ==========================================
+    // 运行模式: 0 = 本地文件模式, 1 = 相机在线模式
+    int g_run_mode = 0; 
+    // 计算设备: 1 = CPU, 2 = GPU
+    int g_compute_device = 1; 
+
     std::string g_model_path;
     std::string g_calib_path;
-    float g_score_threshold = 0.8f;   // 置信度阈值
-    float g_mask_threshold = 0.6f;    // Mask二值化阈值
+    float g_score_threshold = 0.7f;   // 置信度阈值
+    float g_mask_threshold = 0.5f;    // Mask二值化阈值
     bool g_paint_masks_on_vis = true; // 是否在可视化图中绘制Mask
 
     // 相机内参和外参
     cv::Mat g_intrinsic;
     cv::Mat g_transform_world_cam; // T_wc: 相机到世界的变换矩阵
+
+    // 相机设备 (相机模式使用)
+    std::unique_ptr<LanxinCamera> g_camera;
 
     // 本地计算结果结构体
     struct LocalBoxPoseResult {
@@ -84,6 +94,9 @@ int bs_yzx_init(const bool is_debug) {
     spdlog::set_level(is_debug ? spdlog::level::debug : spdlog::level::info);
     spdlog::flush_on(spdlog::level::err);
 
+    // 默认配置
+    g_run_mode = 0;
+    g_compute_device = 1;
     g_model_path = "models/end2end.onnx";
     g_calib_path = "config/params.xml";
     g_score_threshold = 0.7f;
@@ -92,20 +105,35 @@ int bs_yzx_init(const bool is_debug) {
 
     if (!g_is_pipeline_ready) {
         try {
-            cv::FileStorage fs_intrinsic(g_calib_path, cv::FileStorage::READ);
-            if (!fs_intrinsic.isOpened()) return -25;
-            fs_intrinsic["intrinsicRGB"] >> g_intrinsic;
+            // 读取配置文件
+            cv::FileStorage fs_config(g_calib_path, cv::FileStorage::READ);
+            if (!fs_config.isOpened()) {
+                spdlog::error("[init] Cannot open config file: {}", g_calib_path);
+                return -25;
+            }
+
+            // 读取运行模式和计算设备配置
+            // 如果配置文件中没有这些字段，保留默认值
+            if (!fs_config["RunMode"].empty()) {
+                fs_config["RunMode"] >> g_run_mode;
+            }
+            if (!fs_config["DeviceType"].empty()) {
+                fs_config["DeviceType"] >> g_compute_device;
+            }
+
+            spdlog::info("Initializing... RunMode={} (0=File, 1=Camera), DeviceType={} (1=CPU, 2=GPU)", 
+                         g_run_mode, g_compute_device);
+
+            // 读取内参
+            fs_config["intrinsicRGB"] >> g_intrinsic;
             if (g_intrinsic.empty() || g_intrinsic.rows != 3 || g_intrinsic.cols != 3) return -26;
             if (g_intrinsic.type() != CV_64F) g_intrinsic.convertTo(g_intrinsic, CV_64F);
             
-            cv::FileStorage fs_extrinsic(g_calib_path, cv::FileStorage::READ);
-            if (!fs_extrinsic.isOpened()) {
-                spdlog::error("[initExtrinsic] Cannot open extrinsic file: {}", g_calib_path);
-                return -27;
-            }
+            // 读取外参
+            fs_config["extrinsicRGB"] >> g_transform_world_cam;
             
-            fs_extrinsic["extrinsicRGB"] >> g_transform_world_cam;
-            fs_extrinsic.release();
+            // 释放文件句柄
+            fs_config.release(); // 重要：如果复用 fs 对象需注意
             
             if (g_transform_world_cam.empty()) {
                 spdlog::error("[initExtrinsic] extrinsicRGB node not found or empty");
@@ -132,6 +160,23 @@ int bs_yzx_init(const bool is_debug) {
             
             Ort::SessionOptions session_options;
             session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+            // 如果是 GPU 计算模式，配置 CUDA Provider
+            if (g_compute_device == 2) {
+                try {
+                    OrtCUDAProviderOptions cuda_options;
+                    cuda_options.device_id = 0;
+                    cuda_options.arena_extend_strategy = 0;
+                    cuda_options.gpu_mem_limit = SIZE_MAX;
+                    cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+                    cuda_options.do_copy_in_default_stream = 1;
+                    session_options.AppendExecutionProvider_CUDA(cuda_options);
+                    spdlog::info("CUDA Execution Provider appended.");
+                } catch (const std::exception& e) {
+                    spdlog::error("Failed to append CUDA provider: {}", e.what());
+                    // Fallback to CPU or return error? Let's proceed, ORT might fallback.
+                }
+            }
             
             auto to_wstring = [](const std::string& s) -> std::wstring {
                 return { s.begin(), s.end() };
@@ -154,6 +199,19 @@ int bs_yzx_init(const bool is_debug) {
             spdlog::critical("Pipeline initialization failed: {}", e.what());
             g_is_pipeline_ready = false;
             return -1;
+        }
+    }
+
+    // 如果是 相机模式，初始化相机 (无论计算用CPU还是GPU，只要数据源是相机就需要)
+    if (g_run_mode == 1) {
+        if (!g_camera || !g_camera->isOpened()) {
+            g_camera = std::make_unique<LanxinCamera>();
+            if (!g_camera->isOpened()) {
+                spdlog::critical("LanxinCamera connection failed");
+                g_camera.reset();
+                return -2;
+            }
+            spdlog::info("LanxinCamera connected");
         }
     }
 
@@ -548,28 +606,64 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
 
 int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
     if (!g_is_pipeline_ready) return -10;
+    // 相机模式下必须有相机
+    if (g_run_mode == 1 && (!g_camera || !g_camera->isOpened())) return -11;
 
     auto time_start = std::chrono::steady_clock::now();
 
-    // 1. 数据加载 (Data Loading)
-    const fs::path case_dir = fs::path(g_root_output_dir) / std::to_string(task_id);
-    if (!fs::exists(case_dir)) {
-        spdlog::error("Data directory does not exist: {}", case_dir.string());
-        return -21;
-    }
-
-    const fs::path rgb_path = case_dir / "rgb.jpg";
-    cv::Mat image_rgb = cv::imread(rgb_path.string(), cv::IMREAD_COLOR);
-    if (image_rgb.empty()) {
-        spdlog::error("Cannot read RGB image: {}", rgb_path.string());
-        return -22;
-    }
-
-    const fs::path pcd_path = case_dir / "pcAll.pcd";
+    cv::Mat image_rgb;
     open3d::geometry::PointCloud point_cloud;
-    if (!open3d::io::ReadPointCloud(pcd_path.string(), point_cloud) || point_cloud.points_.empty()) {
-        spdlog::error("Cannot read point cloud data: {}", pcd_path.string());
-        return -23;
+    fs::path case_dir = fs::path(g_root_output_dir) / std::to_string(task_id);
+
+    // 1. 数据加载 (Data Loading)
+    if (g_run_mode == 0) {
+        // 本地文件模式
+        if (!fs::exists(case_dir)) {
+            spdlog::error("Data directory does not exist: {}", case_dir.string());
+            return -21;
+        }
+
+        const fs::path rgb_path = case_dir / "rgb.jpg";
+        image_rgb = cv::imread(rgb_path.string(), cv::IMREAD_COLOR);
+        if (image_rgb.empty()) {
+            spdlog::error("Cannot read RGB image: {}", rgb_path.string());
+            return -22;
+        }
+
+        const fs::path pcd_path = case_dir / "pcAll.pcd";
+        if (!open3d::io::ReadPointCloud(pcd_path.string(), point_cloud) || point_cloud.points_.empty()) {
+            spdlog::error("Cannot read point cloud data: {}", pcd_path.string());
+            return -23;
+        }
+    } else {
+        // 相机模式
+        // 确保输出目录存在
+        std::error_code ec;
+        fs::create_directories(case_dir, ec);
+
+        if (g_camera->CapFrame(image_rgb) != 0 || image_rgb.empty()) {
+            spdlog::error("Failed to capture RGB frame");
+            return -22;
+        }
+
+        // 保存原始 RGB
+        const fs::path rgbPath = case_dir / "rgb_orig.jpg";
+        if (!cv::imwrite(rgbPath.string(), image_rgb)) {
+            spdlog::warn("Failed to save original RGB");
+        }
+
+        if (g_camera->CapFrame(point_cloud) != 0 || point_cloud.points_.empty()) {
+            spdlog::error("Failed to capture point cloud or empty");
+            return -23;
+        }
+
+        // 保存原始点云
+        const fs::path pcdPath = case_dir / "cloud_orig.pcd";
+        open3d::io::WritePointCloudOption opt;
+        opt.write_ascii = open3d::io::WritePointCloudOption::IsAscii::Ascii;
+        opt.compressed = open3d::io::WritePointCloudOption::Compressed::Uncompressed;
+        opt.print_progress = false;
+        open3d::io::WritePointCloud(pcdPath.string(), point_cloud, opt);
     }
 
     // 2. 推理检测 (Inference)
@@ -580,7 +674,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
 
     // 4. 主处理循环 (Main Processing Loop)
     std::vector<LocalBoxPoseResult> results;
-    cv::Mat vis_image = image_rgb.clone(); // Basic visualization (e.g. masks) can be added here if needed
+    cv::Mat vis_image = image_rgb.clone(); 
     
     // 如果需要，在可视化图像上绘制掩码
     if (g_paint_masks_on_vis) {
@@ -597,8 +691,6 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
                 cv::addWeighted(roi_view, 1.0, overlay, 0.5, 0, roi_view);
             }
         }
-    } else {
-        vis_image = image_rgb.clone();
     }
 
     int idx_counter = 0;
@@ -628,6 +720,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
         const auto &src = results[i];
         auto &dst = box_array[i];
         
+        dst.id = src.id;
         // 直接赋值，单位已是毫米 (Direct assignment, unit is already mm)
         dst.x = src.xyz_mm.x; 
         dst.y = src.xyz_mm.y; 
@@ -643,20 +736,30 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
         dst.rw7 = rot(2,0); dst.rw8 = rot(2,1); dst.rw9 = rot(2,2);
     }
 
-    // 写入 JSON (Simplified for brevity)
+    // 写入 JSON
     json json_root;
     json_root["taskId"] = task_id;
     json_root["elapsed_ms"] = elapsed_ms;
     json_root["total"] = total_results;
+    json_root["run_mode"] = g_run_mode;
+    json_root["device_type"] = g_compute_device;
     json_root["boxes"] = json::array();
     for (int i = 0; i < num_to_write; ++i) {
         const auto &b = box_array[i];
-        json_root["boxes"].push_back({ {"x", b.x}, {"y", b.y}, {"z", b.z} });
-        // ... more fields can be added back if needed
+        json_root["boxes"].push_back({ 
+            {"id", b.id},
+            {"x", b.x}, {"y", b.y}, {"z", b.z},
+            {"w", b.width}, {"h", b.height},
+            {"W", b.angle_a}, {"P", b.angle_b}, {"R", b.angle_c}
+        });
     }
     
     std::ofstream ofs(case_dir / "boxes.json");
     if (ofs.is_open()) ofs << std::setw(2) << json_root;
+
+    spdlog::info("[ OK ] taskId={} -> {}, targets={} (written {}), time={:.3f} ms, Mode={}, Device={}",
+             task_id, vis_out_path.string(), total_results, num_to_write, elapsed_ms, 
+             (g_run_mode==0 ? "File" : "Camera"), (g_compute_device==1 ? "CPU" : "GPU"));
 
     return num_to_write;
 }

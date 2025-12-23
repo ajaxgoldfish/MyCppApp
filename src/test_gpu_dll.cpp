@@ -1,11 +1,12 @@
 #include <iostream>
-#include "../include/gpu_library.h"
+#include "../include/cpu_library.h"
 
 int main() {
-    std::cout << "开始测试 yzx_vision_zzb_gpu.dll" << std::endl;
+    std::cout << "开始测试 yzx_vision_zzb 库 (GPU Mode)" << std::endl;
     
     // 1. 调用 bs_yzx_init 方法初始化
-    // 参数 true 表示开启调试模式，false 表示关闭
+    // 参数1: true 表示开启调试模式
+    // 参数2: 已移除，改为从 config/params.xml 读取 RunMode 和 DeviceType
     std::cout << "\n=== 步骤1: 初始化系统 ===" << std::endl;
     int result = bs_yzx_init(true);
     
@@ -41,10 +42,10 @@ int main() {
                 std::cout << "  位置 (x, y, z): (" 
                           << boxes[i].x << ", " 
                           << boxes[i].y << ", " 
-                          << boxes[i].z << ") 米" << std::endl;
+                          << boxes[i].z << ") 毫米" << std::endl;
                 std::cout << "  尺寸 (宽x高): " 
                           << boxes[i].width << " x " 
-                          << boxes[i].height << " 米" << std::endl;
+                          << boxes[i].height << " 毫米" << std::endl;
                 std::cout << "  角度 (a, b, c): (" 
                           << boxes[i].angle_a << "°, " 
                           << boxes[i].angle_b << "°, " 
@@ -55,35 +56,20 @@ int main() {
         std::cout << "\n结果已保存到: res/" << taskId << "/ 目录" << std::endl;
         std::cout << "  - rgb_orig.jpg: 原始RGB图像" << std::endl;
         std::cout << "  - cloud_orig.pcd: 原始点云" << std::endl;
-        std::cout << "  - result.jpg: 检测结果可视化" << std::endl;
+        std::cout << "  - vis_on_orig.jpg: 检测结果可视化" << std::endl;
         std::cout << "  - boxes.json: 检测结果JSON" << std::endl;
         
     } else {
         std::cout << "✗ 拍照和检测失败！错误码: " << detection_result << std::endl;
-        
-        // 错误码说明
+        // ... (error codes remain same)
         switch (detection_result) {
-            case -10:
-                std::cout << "  原因: Pipeline 未初始化" << std::endl;
-                break;
-            case -11:
-                std::cout << "  原因: 相机未初始化或未打开" << std::endl;
-                break;
-            case -22:
-                std::cout << "  原因: 无法捕获 RGB 图像" << std::endl;
-                break;
-            case -23:
-                std::cout << "  原因: 无法捕获点云或点云为空" << std::endl;
-                break;
-            case -24:
-                std::cout << "  原因: 输入数据为空" << std::endl;
-                break;
-            case -25:
-                std::cout << "  原因: 图像推理失败" << std::endl;
-                break;
-            default:
-                std::cout << "  原因: 未知错误" << std::endl;
-                break;
+            case -10: std::cout << "  原因: Pipeline 未初始化" << std::endl; break;
+            case -11: std::cout << "  原因: 相机未初始化或未打开" << std::endl; break;
+            case -21: std::cout << "  原因: 数据目录不存在" << std::endl; break;
+            case -22: std::cout << "  原因: 无法捕获/读取 RGB 图像" << std::endl; break;
+            case -23: std::cout << "  原因: 无法捕获/读取 点云" << std::endl; break;
+            case -25: std::cout << "  原因: 标定文件错误" << std::endl; break;
+            default: std::cout << "  原因: 未知错误" << std::endl; break;
         }
     }
     

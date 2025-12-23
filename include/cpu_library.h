@@ -22,6 +22,7 @@ using namespace open3d::geometry;
 
 namespace zzb {
     struct Box {
+        int id;
         double x;
         double y;
         double z;
