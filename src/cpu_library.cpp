@@ -623,14 +623,14 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
             return -21;
         }
 
-        const fs::path rgb_path = case_dir / "rgb.jpg";
+        const fs::path rgb_path = case_dir / "rgb_orig.jpg";
         image_rgb = cv::imread(rgb_path.string(), cv::IMREAD_COLOR);
         if (image_rgb.empty()) {
             spdlog::error("Cannot read RGB image: {}", rgb_path.string());
             return -22;
         }
 
-        const fs::path pcd_path = case_dir / "pcAll.pcd";
+        const fs::path pcd_path = case_dir / "cloud_orig.pcd";
         if (!open3d::io::ReadPointCloud(pcd_path.string(), point_cloud) || point_cloud.points_.empty()) {
             spdlog::error("Cannot read point cloud data: {}", pcd_path.string());
             return -23;
@@ -718,7 +718,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
         cv::Mat mat_tcw = mat_twc_64.inv();
 
         // 2. 使用用户指定的固定世界坐标 X 和 Z
-        double fixed_xw = 2760.0;
+        double fixed_xw = 2800.0;
         double fixed_zw = 500.0;
         
         double fx = g_mat_k.at<double>(0, 0);

@@ -51,8 +51,8 @@ int main() {
         }
 
         // 检查必需的文件是否存在
-        const fs::path rgbPath = caseDir / "rgb.jpg";
-        const fs::path pcdPath = caseDir / "pcAll.pcd";
+        const fs::path rgbPath = caseDir / "rgb_orig.jpg";
+        const fs::path pcdPath = caseDir / "cloud_orig.pcd";
         
         if (!fs::exists(rgbPath) || !fs::exists(pcdPath)) {
             spdlog::warn("[SKIP] 缺少必需文件: {} （需要 rgb.jpg 与 pcAll.pcd）", dirName);
@@ -71,7 +71,7 @@ int main() {
 
         auto t0 = std::chrono::steady_clock::now();
         // 传入 Y 轴边界值 (例如: 1000, -1200)
-        int detectionResult = bs_yzx_object_detection_lanxin(taskId, boxArr, 784.0f, -1200.0f);
+        int detectionResult = bs_yzx_object_detection_lanxin(taskId, boxArr, 1000.0f, -1300.0f);
         auto t1 = std::chrono::steady_clock::now();
 
         double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
