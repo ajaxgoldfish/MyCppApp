@@ -10,9 +10,6 @@ find_package(spdlog CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(PCL CONFIG REQUIRED)
 
-set(Open3D_DIR "${CMAKE_SOURCE_DIR}/third_party/open3d/open3d-devel-windows-amd64-0.19.0/CMake")
-find_package(Open3D CONFIG REQUIRED)
-
 # Common settings
 set(COMMON_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/include
@@ -25,7 +22,6 @@ set(COMMON_LIBS
     ${OpenCV_LIBS}
     spdlog::spdlog
     ${PCL_LIBRARIES}
-    Open3D::Open3D
     ${PROJECT_SOURCE_DIR}/third_party/lanxin/lib/win_x64/LxCameraApi.lib
     ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avcodec.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avdevice.lib

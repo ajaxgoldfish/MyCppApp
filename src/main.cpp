@@ -5,6 +5,11 @@
 #include <spdlog/spdlog.h>
 #include "cpu_library.h"
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace fs = std::filesystem;
 
 int main() {

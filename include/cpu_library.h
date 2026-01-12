@@ -2,23 +2,14 @@
 #define MY_VISION_LIBRARY_H
 
 #include <chrono>
-#include <open3d/Open3D.h>
 #include <filesystem>
 #include <spdlog/spdlog.h>
 #include <opencv2/opencv.hpp>
-#include <open3d/Open3D.h>
-#include <spdlog/spdlog.h>
-#include <filesystem>
-#include <chrono>
 #include <memory>
 #include <vector>
 #include <string>
 #include "LanxinCamera.h"
 #include <nlohmann/json.hpp>
-#include <open3d/io/PointCloudIO.h>
-
-using namespace std;
-using namespace open3d::geometry;
 
 namespace zzb {
     struct Box {

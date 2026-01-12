@@ -4,6 +4,10 @@
 
 #include "cpu_library.h"
 #include "LanxinCamera.h"
+#include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/segmentation/sac_segmentation.h>
 #include <onnxruntime_cxx_api.h>
 #include <Eigen/Dense>
 #include <array>
@@ -14,6 +18,7 @@
 #include <optional>
 #include <fstream>
 
+using namespace std;
 using nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -295,24 +300,24 @@ int bs_yzx_init(const bool is_debug) {
     }
 
 /**
- * @brief 将点云投影到图像平面
+ * @brief 将点云投影到图像平面 (PCL 版本)
  */
 static std::vector<ProjectionMap> project_point_cloud_to_image(
-    const open3d::geometry::PointCloud& pc, const cv::Size& img_size) 
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, const cv::Size& img_size) 
 {
     std::vector<ProjectionMap> proj_map;
-    if (g_mat_k.empty()) return proj_map;
+    if (g_mat_k.empty() || !pc) return proj_map;
 
     const double fx = g_mat_k.at<double>(0, 0), fy = g_mat_k.at<double>(1, 1);
     const double cx = g_mat_k.at<double>(0, 2), cy = g_mat_k.at<double>(1, 2);
     
-    proj_map.reserve(pc.points_.size());
-    for (int i = 0; i < (int)pc.points_.size(); ++i) {
-        const auto &p = pc.points_[i];
-        if (p.z() <= 0) continue; 
+    proj_map.reserve(pc->points.size());
+    for (int i = 0; i < (int)pc->points.size(); ++i) {
+        const auto &p = pc->points[i];
+        if (p.z <= 0) continue; 
         
-        int u = (int)std::round(fx * p.x() / p.z() + cx);
-        int v = (int)std::round(fy * p.y() / p.z() + cy);
+        int u = (int)std::round(fx * p.x / p.z + cx);
+        int v = (int)std::round(fy * p.y / p.z + cy);
         
         if ((unsigned)u < (unsigned)img_size.width && (unsigned)v < (unsigned)img_size.height) {
             proj_map.push_back({u, v, i});
@@ -367,7 +372,7 @@ static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& 
 static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     const DetectionResult2D& det_2d,
     const std::vector<ProjectionMap>& proj_map,
-    const open3d::geometry::PointCloud& global_pc) 
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& global_pc) 
 {
     // 1. 过滤旋转矩形框内的点 (Filter points inside RotatedRect)
     std::vector<Eigen::Vector3d> points_in_box;
@@ -387,7 +392,9 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
         const float local_y = -dx * sin_a + dy * cos_a;
         
         if (std::fabs(local_x) <= half_w && std::fabs(local_y) <= half_h) {
-            points_in_box.push_back(global_pc.points_[proj.point_idx]);
+            // PCL point to Eigen
+            const auto& pt = global_pc->points[proj.point_idx];
+            points_in_box.emplace_back(pt.x, pt.y, pt.z);
         }
     }
 
@@ -436,18 +443,31 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     Eigen::Vector3d ray_2 = get_ray_dir(base_pt_b);
     Eigen::Vector3d ray_3 = get_ray_dir(third_pt);
 
-    // 4. RANSAC 平面拟合 (RANSAC Plane Fitting)
-    auto temp_cloud = std::make_shared<open3d::geometry::PointCloud>();
-    temp_cloud->points_.assign(points_in_box.begin(), points_in_box.end());
-    
-    Eigen::Vector4d plane_param; 
-    std::vector<size_t> inliers;
-    std::tie(plane_param, inliers) = temp_cloud->SegmentPlane(0.004, 3, 300);
+    // 4. RANSAC 平面拟合 (RANSAC Plane Fitting) - PCL Implementation
+    pcl::PointCloud<pcl::PointXYZ>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    temp_cloud->points.reserve(points_in_box.size());
+    for(const auto& pt : points_in_box) {
+        temp_cloud->points.emplace_back(pt.x(), pt.y(), pt.z());
+    }
+    temp_cloud->width = temp_cloud->points.size();
+    temp_cloud->height = 1;
+    temp_cloud->is_dense = false;
 
-    if (inliers.size() < 20) return std::nullopt;
+    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+    pcl::SACSegmentation<pcl::PointXYZ> seg;
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_PLANE);
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setDistanceThreshold(0.004); // 4mm
+    seg.setMaxIterations(300);
+    seg.setInputCloud(temp_cloud);
+    seg.segment(*inliers, *coefficients);
 
-    Eigen::Vector3d n(plane_param[0], plane_param[1], plane_param[2]);
-    double d = plane_param[3];
+    if (inliers->indices.size() < 20) return std::nullopt;
+
+    Eigen::Vector3d n(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
+    double d = coefficients->values[3];
     double norm_l = n.norm();
     if (norm_l < 1e-9) return std::nullopt;
 
@@ -492,12 +512,11 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     cv::Point3f normal_world(normal_world_mat.at<float>(0), normal_world_mat.at<float>(1), normal_world_mat.at<float>(2));
     cv::Point3f dir_world(dir_world_mat.at<float>(0), dir_world_mat.at<float>(1), dir_world_mat.at<float>(2));
 
-    // 变换位置部分 (Transform Position part)
-    // 注意：输入是米，输出转换为毫米
     auto transform_point_to_world_mm = [](const cv::Point3f &p) -> cv::Point3f {
-        cv::Vec4f p_homo(p.x, p.y, p.z, 1.0f); // Convert to mm first
+        // 输入点 p 是米 (m)，外参 g_mat_twc 是毫米 (mm)
+        // 必须先将 p 转为毫米才能与矩阵相乘
+        cv::Vec4f p_homo(p.x * 1000.0f, p.y * 1000.0f, p.z * 1000.0f, 1.0f);
         cv::Mat res = g_mat_twc * cv::Mat(p_homo);
-        // 不再除以1000，保持毫米单位
         return cv::Point3f(res.at<float>(0), res.at<float>(1), res.at<float>(2));
     };
 
@@ -612,7 +631,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
     auto time_start = std::chrono::steady_clock::now();
 
     cv::Mat image_rgb;
-    open3d::geometry::PointCloud point_cloud;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     fs::path case_dir = fs::path(g_root_output_dir) / std::to_string(task_id);
 
     // 1. 数据加载 (Data Loading)
@@ -631,7 +650,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
         }
 
         const fs::path pcd_path = case_dir / "cloud_orig.pcd";
-        if (!open3d::io::ReadPointCloud(pcd_path.string(), point_cloud) || point_cloud.points_.empty()) {
+        if (pcl::io::loadPCDFile(pcd_path.string(), *point_cloud) == -1 || point_cloud->empty()) {
             spdlog::error("Cannot read point cloud data: {}", pcd_path.string());
             return -23;
         }
@@ -652,18 +671,14 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
             spdlog::warn("Failed to save original RGB");
         }
 
-        if (g_camera->CapFrame(point_cloud) != 0 || point_cloud.points_.empty()) {
+        if (g_camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
             spdlog::error("Failed to capture point cloud or empty");
             return -23;
         }
 
         // 保存原始点云
         const fs::path pcdPath = case_dir / "cloud_orig.pcd";
-        open3d::io::WritePointCloudOption opt;
-        opt.write_ascii = open3d::io::WritePointCloudOption::IsAscii::Ascii;
-        opt.compressed = open3d::io::WritePointCloudOption::Compressed::Uncompressed;
-        opt.print_progress = false;
-        open3d::io::WritePointCloud(pcdPath.string(), point_cloud, opt);
+        pcl::io::savePCDFileASCII(pcdPath.string(), *point_cloud);
     }
 
     // 2. 推理检测 (Inference)

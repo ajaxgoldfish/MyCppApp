@@ -5,7 +5,8 @@
 #ifndef LANXINCAMERA_H
 #define LANXINCAMERA_H
 #include <opencv2/opencv.hpp>
-#include <open3d/Open3D.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
 #include "lx_camera_api.h"
 
 class LanxinCamera final {
@@ -13,7 +14,7 @@ public:
     LanxinCamera() {
         connect();
     }
-    int CapFrame(open3d::geometry::PointCloud &pc);
+    int CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc);
 
     bool isOpened() const {
         return isConnect;

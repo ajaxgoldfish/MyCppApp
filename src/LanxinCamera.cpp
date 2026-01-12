@@ -85,7 +85,7 @@ int LanxinCamera::connect() {
     return 0;
 }
 
-int LanxinCamera::CapFrame(open3d::geometry::PointCloud &pc) {
+int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
     if (!isConnect) {
         if (const auto code = connect(); code != 0) {
             return -5;
@@ -107,7 +107,9 @@ int LanxinCamera::CapFrame(open3d::geometry::PointCloud &pc) {
         return -2;
     }
 
+    pc.clear();
     const int total = tof_width * tof_height;
+    pc.points.reserve(total);
     for (int i = 0; i < total; ++i) {
         float x = xyz_data[i * 3];
         float y = xyz_data[i * 3 + 1];
@@ -115,8 +117,11 @@ int LanxinCamera::CapFrame(open3d::geometry::PointCloud &pc) {
         if (x == 0 && y == 0 && z == 0) {
             continue;
         }
-        pc.points_.emplace_back(x / 1000, y / 1000, z / 1000);
+        pc.points.emplace_back(x / 1000, y / 1000, z / 1000);
     }
+    pc.width = pc.points.size();
+    pc.height = 1;
+    pc.is_dense = false;
     return 0;
 }
 
