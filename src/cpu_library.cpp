@@ -733,7 +733,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
         cv::Mat mat_tcw = mat_twc_64.inv();
 
         // 2. 使用用户指定的固定世界坐标 X 和 Z
-        double fixed_xw = 2800.0;
+        double fixed_xw = 2720.0;
         double fixed_zw = 500.0;
         
         double fx = g_mat_k.at<double>(0, 0);

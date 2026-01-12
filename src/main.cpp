@@ -76,7 +76,7 @@ int main() {
 
         auto t0 = std::chrono::steady_clock::now();
         // 传入 Y 轴边界值 (例如: 1000, -1200)
-        int detectionResult = bs_yzx_object_detection_lanxin(taskId, boxArr, 1000.0f, -1300.0f);
+        int detectionResult = bs_yzx_object_detection_lanxin(taskId, boxArr, 1000.0f, -1600.0f);
         auto t1 = std::chrono::steady_clock::now();
 
         double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
