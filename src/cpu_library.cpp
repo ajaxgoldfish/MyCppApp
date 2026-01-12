@@ -495,7 +495,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     // 变换位置部分 (Transform Position part)
     // 注意：输入是米，输出转换为毫米
     auto transform_point_to_world_mm = [](const cv::Point3f &p) -> cv::Point3f {
-        cv::Vec4f p_homo(p.x * 1000.0f, p.y * 1000.0f, p.z * 1000.0f, 1.0f); // Convert to mm first
+        cv::Vec4f p_homo(p.x, p.y, p.z, 1.0f); // Convert to mm first
         cv::Mat res = g_mat_twc * cv::Mat(p_homo);
         // 不再除以1000，保持毫米单位
         return cv::Point3f(res.at<float>(0), res.at<float>(1), res.at<float>(2));
