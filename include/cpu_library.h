@@ -1,15 +1,7 @@
 #ifndef MY_VISION_LIBRARY_H
 #define MY_VISION_LIBRARY_H
 
-#include <chrono>
-#include <filesystem>
-#include <spdlog/spdlog.h>
-#include <opencv2/opencv.hpp>
-#include <memory>
-#include <vector>
-#include <string>
-#include "LanxinCamera.h"
-#include <nlohmann/json.hpp>
+
 
 namespace zzb {
     struct Box {
