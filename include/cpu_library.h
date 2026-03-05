@@ -28,7 +28,7 @@ namespace zzb {
 extern "C" {
 __declspec(dllexport) int bs_yzx_init(bool _isDebug);
 
-__declspec(dllexport) int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[], float y_left_mm = 1000.0f, float y_right_mm = -1200.0f);
+__declspec(dllexport) int bs_yzx_object_detection_lanxin(int taskId, zzb::Box boxArr[]);
 }
 
 #endif //MY_VISION_LIBRARY_H

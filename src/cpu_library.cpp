@@ -611,7 +611,7 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
 }
 
 
-int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_left_mm, float y_right_mm) {
+int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
     if (!g_is_pipeline_ready) return -10;
     // 相机模式下必须有相机
     if (g_run_mode == 1 && (!g_camera || !g_camera->isOpened())) return -11;
@@ -708,55 +708,6 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[], float y_le
 
     // 5. 可视化结果 (Visualize Results)
     visualize_results(vis_image, results);
-
-    // [新增] 绘制世界坐标系 Y 边界辅助线 (Y=1000, Y=-1200)
-    if (!g_mat_twc.empty() && !g_mat_k.empty()) {
-        // float y_left_mm = 1000.0f;  <-- 从参数传入，不再写死
-        // float y_right_mm = -1200.0f; <-- 从参数传入，不再写死
-        
-        // 1. 计算 World -> Camera 变换矩阵 (T_cw = T_wc^-1)
-        // g_mat_twc 是 Camera -> World (在 solve_pose 中: res = g_mat_twc * p_camera)
-        cv::Mat mat_twc_64;
-        g_mat_twc.convertTo(mat_twc_64, CV_64F);
-        cv::Mat mat_tcw = mat_twc_64.inv();
-
-        // 2. 使用用户指定的固定世界坐标 X 和 Z
-        double fixed_xw = 2720.0;
-        double fixed_zw = 500.0;
-        
-        double fx = g_mat_k.at<double>(0, 0);
-        double cx = g_mat_k.at<double>(0, 2);
-        
-        auto get_u_from_world_point = [&](double target_y) -> int {
-            // 构造目标世界坐标点 (X=2760, Y=target, Z=500)
-            cv::Mat p_w = (cv::Mat_<double>(4, 1) << fixed_xw, target_y, fixed_zw, 1.0);
-            
-            // World -> Camera
-            cv::Mat p_c = mat_tcw * p_w;
-            
-            double z_c = p_c.at<double>(2, 0);
-            
-            // 防止除以零或投影到相机背面 (z_c <= 0)
-            if (z_c < 1.0) return -10000; 
-            
-            double x_c = p_c.at<double>(0, 0);
-            // 投影 u = fx * x / z + cx
-            return std::round(fx * x_c / z_c + cx);
-        };
-
-        int u_l = get_u_from_world_point(y_left_mm);
-        int u_r = get_u_from_world_point(y_right_mm);
-
-        auto draw_v_line = [&](int u, const cv::Scalar& color, const std::string& txt) {
-            if (u >= 0 && u < vis_image.cols) {
-                cv::line(vis_image, cv::Point(u, 0), cv::Point(u, vis_image.rows), color, 2);
-                cv::putText(vis_image, txt, cv::Point(u + 5, 60), cv::FONT_HERSHEY_SIMPLEX, 0.7, color, 2);
-            }
-        };
-
-        draw_v_line(u_l, cv::Scalar(255, 0, 0), "Y=" + std::to_string((int)y_left_mm));   // 蓝色
-        draw_v_line(u_r, cv::Scalar(0, 0, 255), "Y=" + std::to_string((int)y_right_mm));  // 红色
-    }
 
     // 6. 结果输出 (Output)
     const fs::path vis_out_path = case_dir / "vis_on_orig.jpg";
