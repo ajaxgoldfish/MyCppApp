@@ -60,14 +60,14 @@ namespace {
     // 本地计算结果结构体
     struct LocalBoxPoseResult {
         int id = -1;
-        cv::Point3f xyz_mm{};         // 中心点坐标 (毫米)
-        cv::Vec3f wpr_deg{};          // 欧拉角 (度)
-        float width_mm = 0.f;         // 宽度 (毫米)
-        float height_mm = 0.f;        // 高度 (毫米)
-        cv::RotatedRect obb;          // 2D 旋转矩形
-        cv::Point2f bottom_mid_px{};  // 底边中点 (像素)
-        cv::Point3f p1_w_mm{}, p2_w_mm{}, p3_w_mm{}; // 关键点 (世界坐标系, 毫米)
-        Eigen::Matrix3d rotation_matrix_world;       // 旋转矩阵 (世界坐标系)
+        cv::Point3f xyz_mm{};
+        cv::Vec3f wpr_deg{};
+        float width_mm = 0.f;
+        float height_mm = 0.f;
+        std::array<cv::Point2f, 4> quad_pts;  // 凸包四点 (像素)
+        cv::Point2f bottom_mid_px{};
+        cv::Point3f p1_w_mm{}, p2_w_mm{}, p3_w_mm{};
+        Eigen::Matrix3d rotation_matrix_world;
     };
 
     // ==========================================
@@ -91,9 +91,8 @@ namespace {
     };
 
     struct DetectionResult2D {
-        cv::RotatedRect obb;
+        std::array<cv::Point2f, 4> quad_pts;  // 凸包四点 (顺时针)
         cv::Point2f bottom_mid_px;
-        cv::Mat1b mask; // Optional: 如果不需要存储原始mask可移除
     };
 
 } // namespace
@@ -336,38 +335,40 @@ static std::vector<ProjectionMap> project_point_cloud_to_image(
 }
 
 /**
- * @brief 从 Mask 提取 2D 旋转矩形和底边中点
+ * @brief 从 Mask 提取凸包四点及底边中点
  */
 static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& mask) {
     if (mask.empty()) return std::nullopt;
-    
-    std::vector<cv::Point> non_zero_pts;
-    cv::findNonZero(mask, non_zero_pts);
-    
-    if (non_zero_pts.empty()) return std::nullopt;
-    
-    cv::RotatedRect obb = cv::minAreaRect(non_zero_pts);
-    if (obb.size.width <= 0 || obb.size.height <= 0) return std::nullopt;
-    
-    // 找到底边中点 (Find bottom edge mid point)
-    cv::Point2f pts_obb[4];
-    obb.points(pts_obb);
-    
-    int idx1 = 0, idx2 = 1; 
-    float max_avg_y = -1e30f;
 
-    auto update_best_edge = [&](int a, int b) {
-        float avg_y = (pts_obb[a].y + pts_obb[b].y) * 0.5f;
-        if (avg_y > max_avg_y) { max_avg_y = avg_y; idx1 = a; idx2 = b; }
+    std::vector<cv::Point> pts;
+    cv::findNonZero(mask, pts);
+    if (pts.empty()) return std::nullopt;
+
+    std::vector<cv::Point> hull;
+    cv::convexHull(pts, hull);
+
+    std::vector<cv::Point2f> quad;
+    if (hull.size() == 4) {
+        for (const auto& p : hull) quad.push_back(cv::Point2f(p));
+    } else if (hull.size() > 4) {
+        cv::approxPolyDP(hull, quad, 0.02f * cv::arcLength(hull, true), true);
+        if (quad.size() != 4) return std::nullopt;
+    } else {
+        return std::nullopt;
+    }
+
+    // 找底边 (y 最大)
+    int i0 = 0, i1 = 1;
+    float max_y = -1e30f;
+    auto check = [&](int a, int b) {
+        float y = (quad[a].y + quad[b].y) * 0.5f;
+        if (y > max_y) { max_y = y; i0 = a; i1 = b; }
     };
-    
-    update_best_edge(0, 1); update_best_edge(1, 2); 
-    update_best_edge(2, 3); update_best_edge(3, 0);
+    check(0, 1); check(1, 2); check(2, 3); check(3, 0);
 
     DetectionResult2D res;
-    res.obb = obb;
-    res.bottom_mid_px = (pts_obb[idx1] + pts_obb[idx2]) * 0.5f;
-    res.mask = mask; // 拷贝引用
+    for (int i = 0; i < 4; ++i) res.quad_pts[i] = quad[i];
+    res.bottom_mid_px = (quad[i0] + quad[i1]) * 0.5f;
     return res;
 }
 
@@ -383,61 +384,37 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     const std::vector<ProjectionMap>& proj_map,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& global_pc) 
 {
-    // 1. 过滤旋转矩形框内的点 (Filter points inside RotatedRect)
+    // 1. 过滤四边形内的点
     std::vector<Eigen::Vector3d> points_in_box;
     points_in_box.reserve(4096);
-    
-    const float center_x = det_2d.obb.center.x, center_y = det_2d.obb.center.y;
-    const float half_w = det_2d.obb.size.width * 0.5f;
-    const float half_h = det_2d.obb.size.height * 0.5f;
-    const float angle_rad = det_2d.obb.angle * (float)CV_PI / 180.f;
-    const float cos_a = std::cos(angle_rad), sin_a = std::sin(angle_rad);
+    std::vector<cv::Point2f> quad(det_2d.quad_pts.begin(), det_2d.quad_pts.end());
 
-    for (const auto &proj : proj_map) {
-        const float dx = (float)proj.u - center_x;
-        const float dy = (float)proj.v - center_y;
-        // 旋转到局部坐标系 (Rotate to local frame)
-        const float local_x = dx * cos_a + dy * sin_a;
-        const float local_y = -dx * sin_a + dy * cos_a;
-        
-        if (std::fabs(local_x) <= half_w && std::fabs(local_y) <= half_h) {
-            // PCL point to Eigen
+    for (const auto& proj : proj_map) {
+        if (cv::pointPolygonTest(quad, cv::Point2f((float)proj.u, (float)proj.v), false) >= 0) {
             const auto& pt = global_pc->points[proj.point_idx];
             points_in_box.emplace_back(pt.x, pt.y, pt.z);
         }
     }
-
     if (points_in_box.size() < 30) return std::nullopt;
 
-    // 2. 识别关键像素点：底边 + 第三点 (Identify key pixels: Base edge + Third point)
-    cv::Point2f base_pt_a, base_pt_b, third_pt;
-    {
-        cv::Point2f rect_pts[4];
-        det_2d.obb.points(rect_pts);
+    // 2. 关键像素点：底边两点 + 第三点
+    const auto& q = det_2d.quad_pts;
+    int ei = 0, ej = 1;
+    float max_y = -1e30f;
+    auto check = [&](int a, int b) {
+        float y = (q[a].y + q[b].y) * 0.5f;
+        if (y > max_y) { max_y = y; ei = a; ej = b; }
+    };
+    check(0, 1); check(1, 2); check(2, 3); check(3, 0);
 
-        int ei = 0, ej = 1;
-        float max_avg_y = -1e30f;
-        auto check_edge = [&](int a, int b) {
-            float val = 0.5f * (rect_pts[a].y + rect_pts[b].y);
-            if (val > max_avg_y) { max_avg_y = val; ei = a; ej = b; }
-        };
-        check_edge(0,1); check_edge(1,2); check_edge(2,3); check_edge(3,0);
+    cv::Point2f base_pt_a = q[ei], base_pt_b = q[ej];
+    if (base_pt_a.x > base_pt_b.x) std::swap(base_pt_a, base_pt_b);
 
-        cv::Point2f b0 = rect_pts[ei];
-        cv::Point2f b1 = rect_pts[ej];
-        if (b0.x > b1.x) std::swap(b0, b1);
-        base_pt_a = b0;
-        base_pt_b = b1;
-
-        bool used[4] = {false};
-        used[ei] = true; used[ej] = true;
-        int remain_idx[2], r_cnt = 0;
-        for(int k=0; k<4; ++k) if(!used[k]) remain_idx[r_cnt++] = k;
-        
-        const cv::Point2f& q0 = rect_pts[remain_idx[0]];
-        const cv::Point2f& q1 = rect_pts[remain_idx[1]];
-        third_pt = (cv::norm(q0 - base_pt_a) <= cv::norm(q1 - base_pt_a)) ? q0 : q1;
-    }
+    bool used[4] = {false};
+    used[ei] = true; used[ej] = true;
+    int r0 = -1, r1 = -1;
+    for (int k = 0; k < 4; ++k) if (!used[k]) { if (r0 < 0) r0 = k; else { r1 = k; break; } }
+    cv::Point2f third_pt = (cv::norm(q[r0] - base_pt_a) <= cv::norm(q[r1] - base_pt_a)) ? q[r0] : q[r1];
 
     // 3. 像素转射线 (Pixel to Ray)
     auto get_ray_dir = [](const cv::Point2f &px) -> Eigen::Vector3d {
@@ -577,7 +554,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     res.wpr_deg = cv::Vec3f((float)rad2deg(roll), (float)rad2deg(pitch), (float)rad2deg(yaw));
     res.width_mm = w_val;
     res.height_mm = h_val;
-    res.obb = det_2d.obb;
+    res.quad_pts = det_2d.quad_pts;
     res.bottom_mid_px = det_2d.bottom_mid_px;
     res.p1_w_mm = p1_w_mm;
     res.p2_w_mm = p2_w_mm;
@@ -592,13 +569,15 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
  */
 static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPoseResult>& results) {
     for (const auto& r : results) {
-        cv::Point2f rect_pts[4];
-        r.obb.points(rect_pts);
         for (int j = 0; j < 4; ++j) {
-            cv::line(vis_image, rect_pts[j], rect_pts[(j + 1) % 4], cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
+            cv::line(vis_image, r.quad_pts[j], r.quad_pts[(j + 1) % 4], cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
         }
         cv::circle(vis_image, r.bottom_mid_px, 5, cv::Scalar(0, 0, 255), -1, cv::LINE_AA);
-        
+
+        cv::Point2f center(0, 0);
+        for (const auto& p : r.quad_pts) center += p;
+        center *= 0.25f;
+
         std::array<std::string, 8> info_lines;
         std::ostringstream oss;
         oss.str(""); oss << "#" << r.id; info_lines[0] = oss.str();
@@ -619,10 +598,10 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
             total_h += text_sizes[j].height;
         }
         total_h += line_gap * 7;
-        
-        int cur_y = (int)std::round(r.obb.center.y - total_h * 0.5);
+
+        int cur_y = (int)std::round(center.y - total_h * 0.5);
         for (int j = 0; j < 8; ++j) {
-            int org_x = (int)std::round(r.obb.center.x - text_sizes[j].width * 0.5);
+            int org_x = (int)std::round(center.x - text_sizes[j].width * 0.5);
             int org_y = cur_y + text_sizes[j].height;
             cv::putText(vis_image, info_lines[j], cv::Point(org_x, org_y),
                         cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0,0,0), 1, cv::LINE_AA);
