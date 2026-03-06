@@ -46,7 +46,7 @@ namespace {
 
     std::string g_model_path;
     std::string g_calib_path;
-    float g_score_threshold = 0.7f;   // 置信度阈值
+    float g_score_threshold = 0.65f;   // 置信度阈值
     float g_mask_threshold = 0.5f;    // Mask二值化阈值
     bool g_paint_masks_on_vis = true; // 是否在可视化图中绘制Mask
 
@@ -350,9 +350,22 @@ static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& 
     std::vector<cv::Point2f> quad;
     if (hull.size() == 4) {
         for (const auto& p : hull) quad.push_back(cv::Point2f(p));
-    } else if (hull.size() > 4) {
-        cv::approxPolyDP(hull, quad, 0.02f * cv::arcLength(hull, true), true);
-        if (quad.size() != 4) return std::nullopt;
+    } else if (hull.size() >= 3) {
+        float arc_len = cv::arcLength(hull, true);
+        if (arc_len < 1e-6f) return std::nullopt;
+        // 尝试多种 epsilon，放宽拟合限制
+        const float eps_ratios[] = {0.01f, 0.02f, 0.03f, 0.05f, 0.1f, 0.2f};
+        for (float r : eps_ratios) {
+            cv::approxPolyDP(hull, quad, r * arc_len, true);
+            if (quad.size() == 4) break;
+        }
+        if (quad.size() != 4) {
+            // 仍无 4 点，用最小外接矩形兜底
+            cv::RotatedRect rr = cv::minAreaRect(hull);
+            cv::Point2f pts4[4];
+            rr.points(pts4);
+            quad.assign(pts4, pts4 + 4);
+        }
     } else {
         return std::nullopt;
     }
