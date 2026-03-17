@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(spdlog CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(PCL CONFIG REQUIRED)
+find_package(OpenMP REQUIRED)
 
 # Common settings
 set(COMMON_INCLUDE_DIRS
@@ -22,6 +23,7 @@ set(COMMON_LIBS
     ${OpenCV_LIBS}
     spdlog::spdlog
     ${PCL_LIBRARIES}
+    OpenMP::OpenMP_CXX
     ${PROJECT_SOURCE_DIR}/third_party/lanxin/lib/win_x64/LxCameraApi.lib
     ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avcodec.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avdevice.lib

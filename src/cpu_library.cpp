@@ -320,15 +320,29 @@ static std::vector<ProjectionMap> project_point_cloud_to_image(
     const double cx = g_mat_k.at<double>(0, 2), cy = g_mat_k.at<double>(1, 2);
     
     proj_map.reserve(pc->points.size());
-    for (int i = 0; i < (int)pc->points.size(); ++i) {
-        const auto &p = pc->points[i];
-        if (p.z <= 0) continue; 
+    
+    #pragma omp parallel
+    {
+        std::vector<ProjectionMap> local_map;
+        // 预分配足够的空间，避免频繁扩容
+        local_map.reserve(pc->points.size() / 4); 
         
-        int u = (int)std::round(fx * p.x / p.z + cx);
-        int v = (int)std::round(fy * p.y / p.z + cy);
+        #pragma omp for nowait
+        for (int i = 0; i < (int)pc->points.size(); ++i) {
+            const auto &p = pc->points[i];
+            if (p.z <= 0) continue; 
+            
+            int u = (int)std::round(fx * p.x / p.z + cx);
+            int v = (int)std::round(fy * p.y / p.z + cy);
+            
+            if ((unsigned)u < (unsigned)img_size.width && (unsigned)v < (unsigned)img_size.height) {
+                local_map.push_back({u, v, i});
+            }
+        }
         
-        if ((unsigned)u < (unsigned)img_size.width && (unsigned)v < (unsigned)img_size.height) {
-            proj_map.push_back({u, v, i});
+        #pragma omp critical
+        {
+            proj_map.insert(proj_map.end(), local_map.begin(), local_map.end());
         }
     }
     return proj_map;
@@ -397,15 +411,24 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     const std::vector<ProjectionMap>& proj_map,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& global_pc) 
 {
-    // 1. 过滤四边形内的点
+    // 1. 过滤四边形内的点 (加入 Bounding Box 快速过滤)
     std::vector<Eigen::Vector3d> points_in_box;
     points_in_box.reserve(4096);
     std::vector<cv::Point2f> quad(det_2d.quad_pts.begin(), det_2d.quad_pts.end());
 
+    // 计算四边形的外接矩形
+    cv::Rect bounding_rect = cv::boundingRect(quad);
+
     for (const auto& proj : proj_map) {
-        if (cv::pointPolygonTest(quad, cv::Point2f((float)proj.u, (float)proj.v), false) >= 0) {
-            const auto& pt = global_pc->points[proj.point_idx];
-            points_in_box.emplace_back(pt.x, pt.y, pt.z);
+        // 先进行快速的 AABB 盒过滤
+        if (proj.u >= bounding_rect.x && proj.u <= bounding_rect.x + bounding_rect.width &&
+            proj.v >= bounding_rect.y && proj.v <= bounding_rect.y + bounding_rect.height) {
+            
+            // 只有在框内的点，才进行昂贵的多边形测试
+            if (cv::pointPolygonTest(quad, cv::Point2f((float)proj.u, (float)proj.v), false) >= 0) {
+                const auto& pt = global_pc->points[proj.point_idx];
+                points_in_box.emplace_back(pt.x, pt.y, pt.z);
+            }
         }
     }
     if (points_in_box.size() < 30) return std::nullopt;
@@ -683,12 +706,20 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
     }
 
     // 2. 推理检测 (Inference)
+    auto t1 = std::chrono::steady_clock::now();
+    spdlog::info("[Timing] Step 1: Data Loading took {:.3f} ms", std::chrono::duration<double, std::milli>(t1 - time_start).count());
+
     auto detected_masks = run_inference_and_get_masks(image_rgb);
     
     // 3. 预计算投影 (Precompute Projection)
+    auto t2 = std::chrono::steady_clock::now();
+    spdlog::info("[Timing] Step 2: Inference took {:.3f} ms", std::chrono::duration<double, std::milli>(t2 - t1).count());
+
     auto proj_map = project_point_cloud_to_image(point_cloud, image_rgb.size());
 
     // 4. 主处理循环 (Main Processing Loop)
+    auto t3 = std::chrono::steady_clock::now();
+    spdlog::info("[Timing] Step 3: Precompute Projection took {:.3f} ms", std::chrono::duration<double, std::milli>(t3 - t2).count());
     std::vector<LocalBoxPoseResult> results;
     cv::Mat vis_image = image_rgb.clone(); 
     
@@ -710,19 +741,30 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
     }
 
     int idx_counter = 0;
-    for (const auto &mask : detected_masks) {
+    #pragma omp parallel for
+    for (int i = 0; i < (int)detected_masks.size(); ++i) {
+        const auto &mask = detected_masks[i];
         if (auto det_2d = extract_rect_from_mask(mask)) {
             if (auto pose_res = solve_pose_for_single_object(*det_2d, proj_map, point_cloud)) {
-                pose_res->id = idx_counter++;
-                results.push_back(std::move(*pose_res));
+                #pragma omp critical
+                {
+                    pose_res->id = idx_counter++;
+                    results.push_back(std::move(*pose_res));
+                }
             }
         }
     }
 
     // 5. 可视化结果 (Visualize Results)
+    auto t4 = std::chrono::steady_clock::now();
+    spdlog::info("[Timing] Step 4: Main Processing Loop took {:.3f} ms", std::chrono::duration<double, std::milli>(t4 - t3).count());
+
     visualize_results(vis_image, results);
 
     // 6. 结果输出 (Output)
+    auto t5 = std::chrono::steady_clock::now();
+    spdlog::info("[Timing] Step 5: Visualize Results took {:.3f} ms", std::chrono::duration<double, std::milli>(t5 - t4).count());
+
     const fs::path vis_out_path = case_dir / "vis_on_orig.jpg";
     cv::imwrite(vis_out_path.string(), vis_image);
 
@@ -772,6 +814,9 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
     
     std::ofstream ofs(case_dir / "boxes.json");
     if (ofs.is_open()) ofs << std::setw(2) << json_root;
+
+    auto t6 = std::chrono::steady_clock::now();
+    spdlog::info("[Timing] Step 6: Output & JSON Write took {:.3f} ms", std::chrono::duration<double, std::milli>(t6 - t5).count());
 
     spdlog::info("[ OK ] taskId={} -> {}, targets={} (written {}), time={:.3f} ms, Mode={}, Device={}",
              task_id, vis_out_path.string(), total_results, num_to_write, elapsed_ms, 
