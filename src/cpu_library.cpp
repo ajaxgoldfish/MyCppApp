@@ -689,20 +689,30 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
             return -22;
         }
 
-        // 保存原始 RGB
+        // 异步保存原始 RGB
         const fs::path rgbPath = case_dir / "rgb_orig.jpg";
-        if (!cv::imwrite(rgbPath.string(), image_rgb)) {
-            spdlog::warn("Failed to save original RGB");
-        }
+        // 深拷贝图像，防止主线程后续处理修改了 image_rgb 导致保存出错
+        cv::Mat image_rgb_clone = image_rgb.clone(); 
+        std::thread([rgbPath, image_rgb_clone]() {
+            if (!cv::imwrite(rgbPath.string(), image_rgb_clone)) {
+                spdlog::warn("Failed to save original RGB");
+            }
+        }).detach(); // detach() 实现“阅后即焚”，不阻塞主线程
 
         if (g_camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
             spdlog::error("Failed to capture point cloud or empty");
             return -23;
         }
 
-        // 保存原始点云
+        // 异步保存原始点云
         const fs::path pcdPath = case_dir / "cloud_orig.pcd";
-        pcl::io::savePCDFileASCII(pcdPath.string(), *point_cloud);
+        // 深拷贝点云，防止主线程后续处理修改了 point_cloud
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_clone(new pcl::PointCloud<pcl::PointXYZ>(*point_cloud));
+        std::thread([pcdPath, cloud_clone]() {
+            pcl::io::savePCDFileASCII(pcdPath.string(), *cloud_clone);
+            // 额外建议：如果不需要人类可读，强烈建议改成二进制保存，速度快得多，文件也小：
+            // pcl::io::savePCDFileBinary(pcdPath.string(), *cloud_clone);
+        }).detach();
     }
 
     // 2. 推理检测 (Inference)
