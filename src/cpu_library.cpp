@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <optional>
 #include <fstream>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <spdlog/spdlog.h>
@@ -46,6 +47,7 @@ namespace {
 
     std::string g_model_path;
     std::string g_calib_path;
+    std::string g_cnn_config_path;
     float g_score_threshold = 0.65f;   // 置信度阈值
     float g_mask_threshold = 0.5f;    // Mask二值化阈值
     bool g_paint_masks_on_vis = true; // 是否在可视化图中绘制Mask
@@ -95,6 +97,64 @@ namespace {
         cv::Point2f bottom_mid_px;
     };
 
+    std::string trim_copy(const std::string& text) {
+        const auto begin = std::find_if_not(text.begin(), text.end(), [](unsigned char ch) {
+            return std::isspace(ch);
+        });
+        const auto end = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char ch) {
+            return std::isspace(ch);
+        }).base();
+
+        if (begin >= end) return {};
+        return {begin, end};
+    }
+
+    void load_cnn_config() {
+        std::ifstream file(g_cnn_config_path);
+        if (!file.is_open()) {
+            spdlog::warn("[init] Cannot open CNN config file: {}, use default score_threshold={}",
+                         g_cnn_config_path, g_score_threshold);
+            return;
+        }
+
+        std::string line;
+        while (std::getline(file, line)) {
+            const auto comment_pos = line.find_first_of("#;");
+            if (comment_pos != std::string::npos) {
+                line = line.substr(0, comment_pos);
+            }
+
+            line = trim_copy(line);
+            if (line.empty() || (line.front() == '[' && line.back() == ']')) continue;
+
+            const auto equals_pos = line.find('=');
+            if (equals_pos == std::string::npos) continue;
+
+            const auto key = trim_copy(line.substr(0, equals_pos));
+            const auto value = trim_copy(line.substr(equals_pos + 1));
+            if (key != "score_threshold") continue;
+
+            try {
+                const float parsed_value = std::stof(value);
+                if (!std::isfinite(parsed_value) || parsed_value < 0.0f || parsed_value > 1.0f) {
+                    spdlog::warn("[init] Invalid score_threshold in {}: {}, use default {}",
+                                 g_cnn_config_path, value, g_score_threshold);
+                    return;
+                }
+
+                g_score_threshold = parsed_value;
+                spdlog::info("[init] CNN score_threshold={}", g_score_threshold);
+            } catch (const std::exception& e) {
+                spdlog::warn("[init] Failed to parse score_threshold in {}: {}, use default {}",
+                             g_cnn_config_path, e.what(), g_score_threshold);
+            }
+            return;
+        }
+
+        spdlog::warn("[init] score_threshold not found in {}, use default {}",
+                     g_cnn_config_path, g_score_threshold);
+    }
+
 } // namespace
 
 
@@ -112,12 +172,15 @@ int bs_yzx_init(const bool is_debug) {
     g_compute_device = 1;
     g_model_path = "models/end2end.onnx";
     g_calib_path = "config/params.xml";
+    g_cnn_config_path = "cnn.ini";
     g_score_threshold = 0.7f;
     g_mask_threshold = 0.5f;
     g_paint_masks_on_vis = true;
 
     if (!g_is_pipeline_ready) {
         try {
+            load_cnn_config();
+
             // 读取配置文件
             cv::FileStorage fs_config(g_calib_path, cv::FileStorage::READ);
             if (!fs_config.isOpened()) {
