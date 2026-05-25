@@ -25,6 +25,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <thread>
 #include "LanxinCamera.h"
 #include <nlohmann/json.hpp>
 
@@ -51,6 +52,11 @@ namespace {
     float g_score_threshold = 0.65f;   // 置信度阈值
     float g_mask_threshold = 0.5f;    // Mask二值化阈值
     bool g_paint_masks_on_vis = true; // 是否在可视化图中绘制Mask
+    int g_rfdetr_input_width = 560;
+    int g_rfdetr_input_height = 560;
+    bool g_rfdetr_exclude_last_class = false;
+    bool g_rfdetr_clip_masks_to_boxes = false;
+    std::string g_rfdetr_score_activation = "sigmoid";
 
     // 相机内参和外参
     cv::Mat g_intrinsic;
@@ -109,6 +115,20 @@ namespace {
         return {begin, end};
     }
 
+    std::string lower_copy(std::string text) {
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        return text;
+    }
+
+    bool parse_bool_value(const std::string& value, bool default_value) {
+        const auto lowered = lower_copy(trim_copy(value));
+        if (lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on") return true;
+        if (lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off") return false;
+        return default_value;
+    }
+
     void load_cnn_config() {
         std::ifstream file(g_cnn_config_path);
         if (!file.is_open()) {
@@ -132,27 +152,55 @@ namespace {
 
             const auto key = trim_copy(line.substr(0, equals_pos));
             const auto value = trim_copy(line.substr(equals_pos + 1));
-            if (key != "score_threshold") continue;
+            const auto key_lower = lower_copy(key);
 
             try {
-                const float parsed_value = std::stof(value);
-                if (!std::isfinite(parsed_value) || parsed_value < 0.0f || parsed_value > 1.0f) {
-                    spdlog::warn("[init] Invalid score_threshold in {}: {}, use default {}",
-                                 g_cnn_config_path, value, g_score_threshold);
-                    return;
+                if (key_lower == "model_path") {
+                    if (!value.empty()) g_model_path = value;
+                } else if (key_lower == "score_threshold") {
+                    const float parsed_value = std::stof(value);
+                    if (!std::isfinite(parsed_value) || parsed_value < 0.0f || parsed_value > 1.0f) {
+                        spdlog::warn("[init] Invalid score_threshold in {}: {}, use default {}",
+                                     g_cnn_config_path, value, g_score_threshold);
+                        continue;
+                    }
+                    g_score_threshold = parsed_value;
+                } else if (key_lower == "mask_threshold") {
+                    const float parsed_value = std::stof(value);
+                    if (!std::isfinite(parsed_value) || parsed_value < 0.0f || parsed_value > 1.0f) {
+                        spdlog::warn("[init] Invalid mask_threshold in {}: {}, use default {}",
+                                     g_cnn_config_path, value, g_mask_threshold);
+                        continue;
+                    }
+                    g_mask_threshold = parsed_value;
+                } else if (key_lower == "input_width" || key_lower == "rfdetr_input_width") {
+                    const int parsed_value = std::stoi(value);
+                    if (parsed_value > 0) g_rfdetr_input_width = parsed_value;
+                } else if (key_lower == "input_height" || key_lower == "rfdetr_input_height") {
+                    const int parsed_value = std::stoi(value);
+                    if (parsed_value > 0) g_rfdetr_input_height = parsed_value;
+                } else if (key_lower == "score_activation" || key_lower == "rfdetr_score_activation") {
+                    const auto activation = lower_copy(value);
+                    if (activation == "sigmoid" || activation == "softmax") {
+                        g_rfdetr_score_activation = activation;
+                    } else {
+                        spdlog::warn("[init] Unsupported score_activation '{}', use {}",
+                                     value, g_rfdetr_score_activation);
+                    }
+                } else if (key_lower == "exclude_last_class" || key_lower == "rfdetr_exclude_last_class") {
+                    g_rfdetr_exclude_last_class = parse_bool_value(value, g_rfdetr_exclude_last_class);
+                } else if (key_lower == "clip_masks_to_boxes" || key_lower == "rfdetr_clip_masks_to_boxes") {
+                    g_rfdetr_clip_masks_to_boxes = parse_bool_value(value, g_rfdetr_clip_masks_to_boxes);
                 }
-
-                g_score_threshold = parsed_value;
-                spdlog::info("[init] CNN score_threshold={}", g_score_threshold);
             } catch (const std::exception& e) {
-                spdlog::warn("[init] Failed to parse score_threshold in {}: {}, use default {}",
-                             g_cnn_config_path, e.what(), g_score_threshold);
+                spdlog::warn("[init] Failed to parse {} in {}: {}", key, g_cnn_config_path, e.what());
             }
-            return;
         }
 
-        spdlog::warn("[init] score_threshold not found in {}, use default {}",
-                     g_cnn_config_path, g_score_threshold);
+        spdlog::info("[init] RF-DETR model={}, input={}x{}, score_threshold={}, mask_threshold={}, activation={}, exclude_last_class={}, clip_masks_to_boxes={}",
+                     g_model_path, g_rfdetr_input_width, g_rfdetr_input_height,
+                     g_score_threshold, g_mask_threshold, g_rfdetr_score_activation,
+                     g_rfdetr_exclude_last_class, g_rfdetr_clip_masks_to_boxes);
     }
 
 } // namespace
@@ -170,7 +218,7 @@ int bs_yzx_init(const bool is_debug) {
     // 默认配置
     g_run_mode = 0;
     g_compute_device = 1;
-    g_model_path = "models/end2end.onnx";
+    g_model_path = "models/rfdetr.onnx";
     g_calib_path = "config/params.xml";
     g_cnn_config_path = "cnn.ini";
     g_score_threshold = 0.7f;
@@ -231,7 +279,7 @@ int bs_yzx_init(const bool is_debug) {
             if (g_mat_twc.type() != CV_32F) g_mat_twc.convertTo(g_mat_twc, CV_32F);
 
             if (!g_env) {
-                g_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "mrcnn");
+                g_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "rfdetr");
             }
             
             Ort::SessionOptions session_options;
@@ -294,79 +342,244 @@ int bs_yzx_init(const bool is_debug) {
     return 0;
 }
 
+int bs_yzx_box_sizeof() {
+    return static_cast<int>(sizeof(zzb::Box));
+}
+
     // ------------------------------------------------------------------------------------------------
     // 辅助函数: 数据预处理 (Preprocessing)
     // ------------------------------------------------------------------------------------------------
 
+    float sigmoid(float value) {
+        return 1.0f / (1.0f + std::exp(-value));
+    }
+
+    size_t find_output_index(const std::vector<std::string>& preferred_names, size_t fallback_index) {
+        for (const auto& preferred : preferred_names) {
+            const auto preferred_lower = lower_copy(preferred);
+            for (size_t i = 0; i < g_output_names_str.size(); ++i) {
+                if (lower_copy(g_output_names_str[i]) == preferred_lower) {
+                    return i;
+                }
+            }
+        }
+        return fallback_index;
+    }
+
+    cv::Rect box_cxcywh_to_rect(const float* box_data, const cv::Size& image_size) {
+        float cx = box_data[0];
+        float cy = box_data[1];
+        float w = box_data[2];
+        float h = box_data[3];
+
+        if (std::max({std::abs(cx), std::abs(cy), std::abs(w), std::abs(h)}) <= 2.0f) {
+            cx *= static_cast<float>(image_size.width);
+            cy *= static_cast<float>(image_size.height);
+            w *= static_cast<float>(image_size.width);
+            h *= static_cast<float>(image_size.height);
+        }
+
+        const int x1 = std::clamp(static_cast<int>(std::lround(cx - w * 0.5f)), 0, image_size.width - 1);
+        const int y1 = std::clamp(static_cast<int>(std::lround(cy - h * 0.5f)), 0, image_size.height - 1);
+        const int x2 = std::clamp(static_cast<int>(std::lround(cx + w * 0.5f)), 0, image_size.width - 1);
+        const int y2 = std::clamp(static_cast<int>(std::lround(cy + h * 0.5f)), 0, image_size.height - 1);
+        return cv::Rect(cv::Point(x1, y1), cv::Point(std::max(x1 + 1, x2), std::max(y1 + 1, y2))) &
+               cv::Rect(0, 0, image_size.width, image_size.height);
+    }
+
+    float max_class_score(const float* logits, int class_count) {
+        const int score_class_count = g_rfdetr_exclude_last_class ? std::max(0, class_count - 1) : class_count;
+        if (score_class_count <= 0) return 0.0f;
+
+        if (g_rfdetr_score_activation == "softmax") {
+            float max_logit = logits[0];
+            for (int i = 1; i < class_count; ++i) max_logit = std::max(max_logit, logits[i]);
+
+            double sum_exp = 0.0;
+            for (int i = 0; i < class_count; ++i) {
+                sum_exp += std::exp(static_cast<double>(logits[i] - max_logit));
+            }
+            if (sum_exp <= 0.0) return 0.0f;
+
+            float best = 0.0f;
+            for (int i = 0; i < score_class_count; ++i) {
+                const float score = static_cast<float>(std::exp(static_cast<double>(logits[i] - max_logit)) / sum_exp);
+                best = std::max(best, score);
+            }
+            return best;
+        }
+
+        float best = 0.0f;
+        for (int i = 0; i < score_class_count; ++i) {
+            best = std::max(best, sigmoid(logits[i]));
+        }
+        return best;
+    }
+
+    int64_t query_count_from_shape(const std::vector<int64_t>& shape, size_t trailing_dims) {
+        if (shape.size() <= trailing_dims) return 0;
+
+        int64_t count = 0;
+        for (size_t i = 0; i < shape.size() - trailing_dims; ++i) {
+            count = std::max(count, shape[i]);
+        }
+        return count;
+    }
+
+    std::string shape_to_string(const std::vector<int64_t>& shape) {
+        std::ostringstream oss;
+        oss << "[";
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << shape[i];
+        }
+        oss << "]";
+        return oss.str();
+    }
+
     /**
-     * @brief 执行 ONNX Runtime 推理并解析结果
+     * @brief 执行 RF-DETR Seg ONNX 推理并返回原图尺寸的实例Mask
      */
     static std::vector<cv::Mat1b> run_inference_and_get_masks(const cv::Mat& image_rgb) {
         std::vector<cv::Mat1b> detected_masks;
         if (image_rgb.empty()) return detected_masks;
 
+        cv::Mat resized;
+        cv::resize(image_rgb, resized, cv::Size(g_rfdetr_input_width, g_rfdetr_input_height), 0, 0, cv::INTER_LINEAR);
+
         cv::Mat rgb_float;
-        cv::cvtColor(image_rgb, rgb_float, cv::COLOR_BGR2RGB);
-        rgb_float.convertTo(rgb_float, CV_32F);
-        
-        // 归一化参数 (Normalize)
-        static const cv::Scalar kMean(123.675, 116.28, 103.53);
-        static const cv::Scalar kStdv(58.395, 57.12, 57.375);
+        cv::cvtColor(resized, rgb_float, cv::COLOR_BGR2RGB);
+        rgb_float.convertTo(rgb_float, CV_32F, 1.0 / 255.0);
+
+        static const cv::Scalar kMean(0.485, 0.456, 0.406);
+        static const cv::Scalar kStdv(0.229, 0.224, 0.225);
         cv::subtract(rgb_float, kMean, rgb_float);
         cv::divide(rgb_float, kStdv, rgb_float);
-        
+
         cv::Mat blob;
         cv::dnn::blobFromImage(rgb_float, blob, 1.0, cv::Size(), {}, false, false, CV_32F);
-        
+
         std::vector<int64_t> input_shape = {1, 3, blob.size[2], blob.size[3]};
         Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-            mem_info, reinterpret_cast<float *>(blob.data), static_cast<size_t>(blob.total()), input_shape.data(), input_shape.size());
-        
+            mem_info, reinterpret_cast<float *>(blob.data), static_cast<size_t>(blob.total()),
+            input_shape.data(), input_shape.size());
+
         const char *input_names[] = {g_input_name.c_str()};
+        spdlog::info("RF-DETR running ONNX inference, input={}x{}", g_rfdetr_input_width, g_rfdetr_input_height);
         auto ort_outputs = g_session->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1,
                               g_output_names_ptr.data(), g_output_names_ptr.size());
-        
-        if (ort_outputs.size() < 3) return detected_masks;
+        spdlog::info("RF-DETR ONNX inference finished, output_count={}", ort_outputs.size());
 
-        // 解析输出 (Parse outputs)
-        auto shape_dets = ort_outputs[0].GetTensorTypeAndShapeInfo().GetShape();
-        auto shape_masks = ort_outputs[2].GetTensorTypeAndShapeInfo().GetShape();
-        int64_t num_detections = shape_dets[1];
-        int mask_h = (int) shape_masks[2];
-        int mask_w = (int) shape_masks[3];
-        
-        const float *det_data = ort_outputs[0].GetTensorData<float>();
-        const float *mask_tensor_data = ort_outputs[2].GetTensorData<float>();
+        if (ort_outputs.size() < 3) {
+            spdlog::error("RF-DETR Seg expects 3 outputs: dets, labels, masks. Actual output count={}", ort_outputs.size());
+            return detected_masks;
+        }
 
-        detected_masks.reserve((size_t)num_detections);
-        for (int64_t i = 0; i < num_detections; ++i) {
-            const float *curr_det = det_data + i * 5;
-            float score = curr_det[4];
+        const size_t boxes_idx = find_output_index({"dets", "pred_boxes", "boxes"}, 0);
+        const size_t logits_idx = find_output_index({"labels", "pred_logits", "logits"}, 1);
+        const size_t masks_idx = find_output_index({"masks", "pred_masks"}, 2);
+
+        auto info_boxes = ort_outputs[boxes_idx].GetTensorTypeAndShapeInfo();
+        auto info_logits = ort_outputs[logits_idx].GetTensorTypeAndShapeInfo();
+        auto info_masks = ort_outputs[masks_idx].GetTensorTypeAndShapeInfo();
+        auto shape_boxes = info_boxes.GetShape();
+        auto shape_logits = info_logits.GetShape();
+        auto shape_masks = info_masks.GetShape();
+        spdlog::info("RF-DETR outputs: boxes {}={}, logits {}={}, masks {}={}",
+                     g_output_names_str[boxes_idx], shape_to_string(shape_boxes),
+                     g_output_names_str[logits_idx], shape_to_string(shape_logits),
+                     g_output_names_str[masks_idx], shape_to_string(shape_masks));
+
+        if (info_boxes.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            info_logits.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            info_masks.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            spdlog::error("RF-DETR outputs must be float tensors.");
+            return detected_masks;
+        }
+
+        if (shape_boxes.empty() || shape_logits.empty() || shape_masks.size() < 3 ||
+            shape_boxes.back() != 4 || shape_logits.back() <= 0) {
+            spdlog::error("Unexpected RF-DETR output shapes: boxes dims={}, logits dims={}, masks dims={}",
+                          shape_boxes.size(), shape_logits.size(), shape_masks.size());
+            return detected_masks;
+        }
+
+        const int64_t box_count = query_count_from_shape(shape_boxes, 1);
+        const int64_t logit_count = query_count_from_shape(shape_logits, 1);
+        const int64_t mask_count = query_count_from_shape(shape_masks, 2);
+        const int64_t query_count = std::min({box_count, logit_count, mask_count});
+        const int class_count = static_cast<int>(shape_logits.back());
+        const int mask_h = static_cast<int>(shape_masks[shape_masks.size() - 2]);
+        const int mask_w = static_cast<int>(shape_masks[shape_masks.size() - 1]);
+
+        if (query_count <= 0 || mask_h <= 0 || mask_w <= 0) {
+            spdlog::warn("RF-DETR produced empty outputs: queries={}, mask={}x{}", query_count, mask_w, mask_h);
+            return detected_masks;
+        }
+
+        const int64_t mask_area = static_cast<int64_t>(mask_h) * mask_w;
+        const int64_t required_box_elements = query_count * 4;
+        const int64_t required_logit_elements = query_count * class_count;
+        const int64_t required_mask_elements = query_count * mask_area;
+        if (info_boxes.GetElementCount() < required_box_elements ||
+            info_logits.GetElementCount() < required_logit_elements ||
+            info_masks.GetElementCount() < required_mask_elements) {
+            spdlog::error("RF-DETR output buffers are smaller than expected: boxes {}/{}, logits {}/{}, masks {}/{}",
+                          info_boxes.GetElementCount(), required_box_elements,
+                          info_logits.GetElementCount(), required_logit_elements,
+                          info_masks.GetElementCount(), required_mask_elements);
+            return detected_masks;
+        }
+
+        const float *box_data = ort_outputs[boxes_idx].GetTensorData<float>();
+        const float *logit_data = ort_outputs[logits_idx].GetTensorData<float>();
+        const float *mask_data = ort_outputs[masks_idx].GetTensorData<float>();
+
+        detected_masks.reserve(static_cast<size_t>(query_count));
+        for (int64_t i = 0; i < query_count; ++i) {
+            const float score = max_class_score(logit_data + i * class_count, class_count);
             if (score < g_score_threshold) continue;
-            
-            int x1 = std::clamp((int)std::lround(curr_det[0]), 0, image_rgb.cols - 1);
-            int y1 = std::clamp((int)std::lround(curr_det[1]), 0, image_rgb.rows - 1);
-            int x2 = std::clamp((int)std::lround(curr_det[2]), 0, image_rgb.cols - 1);
-            int y2 = std::clamp((int)std::lround(curr_det[3]), 0, image_rgb.rows - 1);
-            
-            cv::Rect roi_rect(x1, y1, std::max(1, x2 - x1), std::max(1, y2 - y1));
-            roi_rect &= cv::Rect(0, 0, image_rgb.cols, image_rgb.rows);
-            if (roi_rect.area() <= 0) continue;
-            
-            const float *curr_mask_ptr = mask_tensor_data + i * (mask_h * mask_w);
-            cv::Mat mask_float(mask_h, mask_w, CV_32F, const_cast<float *>(curr_mask_ptr));
+
+            const cv::Rect box_rect = box_cxcywh_to_rect(box_data + i * 4, image_rgb.size());
+            if (box_rect.area() <= 0) continue;
+
+            const float *curr_mask_ptr = mask_data + i * mask_area;
+            cv::Mat mask_raw(mask_h, mask_w, CV_32F, const_cast<float *>(curr_mask_ptr));
+
+            double min_value = 0.0, max_value = 0.0;
+            cv::minMaxLoc(mask_raw, &min_value, &max_value);
+            const bool mask_is_logits = min_value < 0.0 || max_value > 1.0;
+
+            cv::Mat mask_prob(mask_h, mask_w, CV_32F);
+            if (mask_is_logits) {
+                for (int y = 0; y < mask_h; ++y) {
+                    const float *src = mask_raw.ptr<float>(y);
+                    float *dst = mask_prob.ptr<float>(y);
+                    for (int x = 0; x < mask_w; ++x) {
+                        dst[x] = sigmoid(src[x]);
+                    }
+                }
+            } else {
+                mask_raw.copyTo(mask_prob);
+            }
+
             cv::Mat mask_resized;
-            cv::resize(mask_float, mask_resized, roi_rect.size(), 0, 0, cv::INTER_LINEAR);
-            
-            cv::Mat1b mask_bin;
-            cv::compare(mask_resized, g_mask_threshold, mask_bin, cv::CMP_GT);
-            
-            cv::Mat1b full_mask(image_rgb.rows, image_rgb.cols, (uchar)0);
-            full_mask(roi_rect).setTo(255, mask_bin);
+            cv::resize(mask_prob, mask_resized, image_rgb.size(), 0, 0, cv::INTER_LINEAR);
+
+            cv::Mat1b full_mask;
+            cv::compare(mask_resized, g_mask_threshold, full_mask, cv::CMP_GT);
+
+            if (g_rfdetr_clip_masks_to_boxes) {
+                cv::Mat1b clipped(image_rgb.rows, image_rgb.cols, static_cast<uchar>(0));
+                full_mask(box_rect).copyTo(clipped(box_rect));
+                full_mask = std::move(clipped);
+            }
+
             detected_masks.emplace_back(std::move(full_mask));
         }
 
+        spdlog::debug("RF-DETR Seg kept {} masks from {} queries", detected_masks.size(), query_count);
         return detected_masks;
     }
 
@@ -711,7 +924,9 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
 
 
 int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
+    try {
     if (!g_is_pipeline_ready) return -10;
+    if (box_array == nullptr) return -12;
     // 相机模式下必须有相机
     if (g_run_mode == 1 && (!g_camera || !g_camera->isOpened())) return -11;
 
@@ -896,4 +1111,17 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
              (g_run_mode==0 ? "File" : "Camera"), (g_compute_device==1 ? "CPU" : "GPU"));
 
     return num_to_write;
+    } catch (const Ort::Exception& e) {
+        spdlog::critical("bs_yzx_object_detection_lanxin Ort exception: {}", e.what());
+        return -91;
+    } catch (const cv::Exception& e) {
+        spdlog::critical("bs_yzx_object_detection_lanxin OpenCV exception: {}", e.what());
+        return -92;
+    } catch (const std::exception& e) {
+        spdlog::critical("bs_yzx_object_detection_lanxin exception: {}", e.what());
+        return -93;
+    } catch (...) {
+        spdlog::critical("bs_yzx_object_detection_lanxin unknown exception");
+        return -94;
+    }
 }

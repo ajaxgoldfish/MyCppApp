@@ -15,7 +15,7 @@ find_package(OpenMP REQUIRED)
 set(COMMON_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/third_party/lanxin/include
-    ${CMAKE_SOURCE_DIR}/third_party/onnxruntime-gpu/include
+    ${CMAKE_SOURCE_DIR}/third_party/onnxruntime-win-x64-gpu-1.25.1/include
     ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/include
 )
 
@@ -32,7 +32,7 @@ set(COMMON_LIBS
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avutil.lib
         ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swresample.lib
     ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/swscale.lib
-    ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-gpu/lib/onnxruntime.lib
+    ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-win-x64-gpu-1.25.1/lib/onnxruntime.lib
 )
 
 # 1. MyCppApp (Unified executable)
