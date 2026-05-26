@@ -3,8 +3,8 @@
 
 int main(int argc, char *argv[]) {
     std::cout << "Start testing yzx_vision_zzb_gpu" << std::endl;
-    if (argc <= 1) {
-        std::cout << "Camera IP is required. Usage: test_gpu_dll.exe <camera_ip>" << std::endl;
+    if (argc <= 2) {
+        std::cout << "Camera IP and intrinsic/extrinsic path are required. Usage: test_gpu_dll.exe <camera_ip> <intrinsic_extrinsic_path>" << std::endl;
         return -1;
     }
 
@@ -16,7 +16,8 @@ int main(int argc, char *argv[]) {
 
     zzb::Box boxes[100]{};
     const char *cameraIp = argv[1];
-    const int detection_result = bs_yzx_object_detection_lanxin(boxes, cameraIp);
+    const char *intrinsicExtrinsicPath = argv[2];
+    const int detection_result = bs_yzx_object_detection_lanxin(boxes, cameraIp, intrinsicExtrinsicPath);
 
     if (detection_result < 0) {
         std::cout << "Detection failed, error code: " << detection_result << std::endl;

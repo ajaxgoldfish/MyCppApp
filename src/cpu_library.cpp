@@ -42,7 +42,6 @@ namespace {
     // 全局配置与资源 (Global Configuration)
     // ==========================================
     std::string g_model_path;
-    std::string g_calib_path;
     std::string g_cnn_config_path;
     float g_score_threshold = 0.65f;   // 置信度阈值
     float g_mask_threshold = 0.5f;    // Mask二值化阈值
@@ -55,7 +54,6 @@ namespace {
 
     // 相机内参和外参
     cv::Mat g_intrinsic;
-    cv::Mat g_transform_world_cam; // T_wc: 相机到世界的变换矩阵
 
     // 相机设备 (相机模式使用)
     std::unique_ptr<LanxinCamera> g_camera;
@@ -120,6 +118,57 @@ namespace {
     std::string normalize_camera_ip(const char *camera_ip) {
         if (camera_ip == nullptr) return {};
         return trim_copy(camera_ip);
+    }
+
+    std::string normalize_path(const char *path) {
+        if (path == nullptr) return {};
+        return trim_copy(path);
+    }
+
+    int load_calibration_from_path(const std::string& calibration_path) {
+        if (calibration_path.empty()) {
+            spdlog::error("Intrinsic/extrinsic path is required");
+            return -14;
+        }
+
+        cv::FileStorage fs_config(calibration_path, cv::FileStorage::READ);
+        if (!fs_config.isOpened()) {
+            spdlog::error("[calibration] Cannot open config file: {}", calibration_path);
+            return -25;
+        }
+
+        cv::Mat intrinsic;
+        cv::Mat transform_world_cam;
+        fs_config["intrinsicRGB"] >> intrinsic;
+        fs_config["extrinsicRGB"] >> transform_world_cam;
+        fs_config.release();
+
+        if (intrinsic.empty() || intrinsic.rows != 3 || intrinsic.cols != 3) {
+            spdlog::error("[calibration] intrinsicRGB must be 3x3 matrix: {}", calibration_path);
+            return -26;
+        }
+        if (intrinsic.type() != CV_64F) intrinsic.convertTo(intrinsic, CV_64F);
+
+        if (transform_world_cam.empty()) {
+            spdlog::error("[calibration] extrinsicRGB node not found or empty: {}", calibration_path);
+            return -28;
+        }
+        if (transform_world_cam.rows != 4 || transform_world_cam.cols != 4) {
+            spdlog::error("[calibration] extrinsicRGB must be 4x4 matrix: {}", calibration_path);
+            return -29;
+        }
+        if (transform_world_cam.type() != CV_64F) {
+            transform_world_cam.convertTo(transform_world_cam, CV_64F);
+        }
+
+        g_intrinsic = intrinsic.clone();
+        g_mat_k = g_intrinsic.clone();
+        g_mat_k_inv = g_mat_k.inv();
+        g_mat_twc = transform_world_cam.clone();
+        if (g_mat_twc.type() != CV_32F) g_mat_twc.convertTo(g_mat_twc, CV_32F);
+
+        spdlog::info("[calibration] Loaded intrinsic/extrinsic from {}", calibration_path);
+        return 0;
     }
 
     int ensure_camera_for_ip(const std::string& camera_ip) {
@@ -251,7 +300,6 @@ int bs_yzx_init(const bool is_debug) {
 
     // 默认配置
     g_model_path = "models/rfdetr.onnx";
-    g_calib_path = "config/params.xml";
     g_cnn_config_path = "cnn.ini";
     g_score_threshold = 0.7f;
     g_mask_threshold = 0.5f;
@@ -261,44 +309,7 @@ int bs_yzx_init(const bool is_debug) {
         try {
             load_cnn_config();
 
-            // 读取配置文件
-            cv::FileStorage fs_config(g_calib_path, cv::FileStorage::READ);
-            if (!fs_config.isOpened()) {
-                spdlog::error("[init] Cannot open config file: {}", g_calib_path);
-                return -25;
-            }
-
             spdlog::info("Initializing camera + GPU pipeline");
-
-            // 读取内参
-            fs_config["intrinsicRGB"] >> g_intrinsic;
-            if (g_intrinsic.empty() || g_intrinsic.rows != 3 || g_intrinsic.cols != 3) return -26;
-            if (g_intrinsic.type() != CV_64F) g_intrinsic.convertTo(g_intrinsic, CV_64F);
-            
-            // 读取外参
-            fs_config["extrinsicRGB"] >> g_transform_world_cam;
-            
-            // 释放文件句柄
-            fs_config.release(); // 重要：如果复用 fs 对象需注意
-            
-            if (g_transform_world_cam.empty()) {
-                spdlog::error("[initExtrinsic] extrinsicRGB node not found or empty");
-                return -28;
-            }
-            
-            if (g_transform_world_cam.rows != 4 || g_transform_world_cam.cols != 4) {
-                spdlog::error("[initExtrinsic] extrinsicRGB must be 4x4 matrix");
-                return -29;
-            }
-            
-            if (g_transform_world_cam.type() != CV_64F) {
-                g_transform_world_cam.convertTo(g_transform_world_cam, CV_64F);
-            }
-            
-            g_mat_k = g_intrinsic.clone(); // CV_64F
-            g_mat_k_inv = g_mat_k.inv();
-            g_mat_twc = g_transform_world_cam.clone(); // 4x4
-            if (g_mat_twc.type() != CV_32F) g_mat_twc.convertTo(g_mat_twc, CV_32F);
 
             if (!g_env) {
                 g_env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "rfdetr");
@@ -950,12 +961,19 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
 }
 
 
-int bs_yzx_object_detection_lanxin(zzb::Box box_array[], const char *cameraIp) {
+int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
+                                   const char *cameraIp,
+                                   const char *intrinsicExtrinsicPath) {
     try {
     if (!g_is_pipeline_ready) return -10;
     if (box_array == nullptr) return -12;
 
     const std::string requested_camera_ip = normalize_camera_ip(cameraIp);
+    const std::string requested_calibration_path = normalize_path(intrinsicExtrinsicPath);
+    if (const int calibration_result = load_calibration_from_path(requested_calibration_path); calibration_result != 0) {
+        return calibration_result;
+    }
+
     if (const int camera_result = ensure_camera_for_ip(requested_camera_ip); camera_result != 0) {
         return camera_result;
     }
@@ -1093,9 +1111,9 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[], const char *cameraIp) {
     auto t6 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 6: Output {:.3f} ms", std::chrono::duration<double, std::milli>(t6 - t5).count());
 
-    spdlog::info("[ OK ] timestamp={} -> {}, targets={} (written {}), time={:.3f} ms, Mode=Camera, Device=GPU, CameraIp={}",
+    spdlog::info("[ OK ] timestamp={} -> {}, targets={} (written {}), time={:.3f} ms, Mode=Camera, Device=GPU, CameraIp={}, CalibrationPath={}",
              timestamp, vis_out_path.string(), total_results, num_to_write, elapsed_ms, 
-             requested_camera_ip);
+             requested_camera_ip, requested_calibration_path);
 
     return num_to_write;
     } catch (const Ort::Exception& e) {

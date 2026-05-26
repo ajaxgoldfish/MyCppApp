@@ -35,18 +35,7 @@ set(COMMON_LIBS
     ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-win-x64-gpu-1.25.1/lib/onnxruntime.lib
 )
 
-# 1. MyCppApp (Unified executable)
-# Compiles sources directly
-add_executable(MyCppApp 
-    src/main.cpp
-    src/cpu_library.cpp
-    src/LanxinCamera.cpp
-)
-
-target_include_directories(MyCppApp PRIVATE ${COMMON_INCLUDE_DIRS})
-target_link_libraries(MyCppApp PRIVATE ${COMMON_LIBS})
-
-# 2. Shared Library (Unified DLL)
+# 1. Shared Library (Unified DLL)
 # Previously yzx_vision_zzb_gpu, now just yzx_vision_zzb or keep name for compat
 add_library(yzx_vision_zzb_gpu SHARED
     src/cpu_library.cpp
@@ -56,7 +45,7 @@ add_library(yzx_vision_zzb_gpu SHARED
 target_include_directories(yzx_vision_zzb_gpu PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${COMMON_LIBS})
 
-# 3. Test Executable (Links against DLL)
+# 2. Test Executable (Links against DLL)
 add_executable(test_gpu_dll src/test_gpu_dll.cpp)
 
 target_include_directories(test_gpu_dll PRIVATE ${COMMON_INCLUDE_DIRS})
