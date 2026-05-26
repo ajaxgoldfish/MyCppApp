@@ -1,8 +1,12 @@
 #include <iostream>
 #include "../include/cpu_library.h"
 
-int main() {
+int main(int argc, char *argv[]) {
     std::cout << "Start testing yzx_vision_zzb_gpu" << std::endl;
+    if (argc <= 1) {
+        std::cout << "Camera IP is required. Usage: test_gpu_dll.exe <camera_ip>" << std::endl;
+        return -1;
+    }
 
     const int init_result = bs_yzx_init(true);
     if (init_result != 0) {
@@ -11,7 +15,8 @@ int main() {
     }
 
     zzb::Box boxes[100]{};
-    const int detection_result = bs_yzx_object_detection_lanxin(boxes);
+    const char *cameraIp = argv[1];
+    const int detection_result = bs_yzx_object_detection_lanxin(boxes, cameraIp);
 
     if (detection_result < 0) {
         std::cout << "Detection failed, error code: " << detection_result << std::endl;

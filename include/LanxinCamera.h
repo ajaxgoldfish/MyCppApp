@@ -7,24 +7,33 @@
 #include <opencv2/opencv.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <string>
+#include <utility>
 #include "lx_camera_api.h"
 
 class LanxinCamera final {
 public:
-    LanxinCamera() {
+    explicit LanxinCamera(std::string cameraIp) : camera_ip_(std::move(cameraIp)) {
         connect();
     }
+
     int CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc);
 
     bool isOpened() const {
         return isConnect;
     }
 
+    [[nodiscard]] const std::string& getCameraIp() const {
+        return camera_ip_;
+    }
+
     int CapFrame(cv::Mat &rgbMat);
 
     ~LanxinCamera() {
-        DcStopStream(handle);
-        DcCloseDevice(handle);
+        if (isConnect) {
+            DcStopStream(handle);
+            DcCloseDevice(handle);
+        }
     }
 
     [[nodiscard]] cv::Mat get_param() const {
@@ -36,6 +45,7 @@ private:
 
     LxDeviceInfo *p_device_list = nullptr;
     DcHandle handle = 0;
+    std::string camera_ip_;
     int rgb_data_type = 0;
     int rgb_channles = 0;
     int rgb_height = 0;

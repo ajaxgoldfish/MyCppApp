@@ -1,11 +1,5 @@
 <?xml version="1.0"?>
 <opencv_storage>
-    <!-- 运行模式: 0 = 本地文件模式, 1 = 相机在线模式 -->
-    <RunMode>0</RunMode>
-    
-    <!-- 计算设备: 1 = CPU, 2 = GPU -->
-    <DeviceType>1</DeviceType>
-
     <extrinsicRGB type_id="opencv-matrix">
         <rows>4</rows>
         <cols>4</cols>
@@ -28,4 +22,3 @@
         </data>
     </intrinsicRGB>
 </opencv_storage>
-

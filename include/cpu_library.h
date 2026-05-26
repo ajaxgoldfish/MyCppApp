@@ -30,7 +30,7 @@ __declspec(dllexport) int bs_yzx_init(bool _isDebug);
 
 __declspec(dllexport) int bs_yzx_box_sizeof();
 
-__declspec(dllexport) int bs_yzx_object_detection_lanxin(zzb::Box boxArr[]);
+__declspec(dllexport) int bs_yzx_object_detection_lanxin(zzb::Box boxArr[], const char *cameraIp);
 }
 
 #endif //MY_VISION_LIBRARY_H

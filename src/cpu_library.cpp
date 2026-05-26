@@ -29,10 +29,8 @@
 #include <string>
 #include <thread>
 #include "LanxinCamera.h"
-#include <nlohmann/json.hpp>
 
 using namespace std;
-using nlohmann::json;
 namespace fs = std::filesystem;
 
 #ifndef YZX_MAX_BOX
@@ -43,11 +41,6 @@ namespace {
     // ==========================================
     // 全局配置与资源 (Global Configuration)
     // ==========================================
-    // 运行模式: 0 = 本地文件模式, 1 = 相机在线模式
-    int g_run_mode = 0; 
-    // 计算设备: 1 = CPU, 2 = GPU
-    int g_compute_device = 1; 
-
     std::string g_model_path;
     std::string g_calib_path;
     std::string g_cnn_config_path;
@@ -122,6 +115,45 @@ namespace {
             return static_cast<char>(std::tolower(ch));
         });
         return text;
+    }
+
+    std::string normalize_camera_ip(const char *camera_ip) {
+        if (camera_ip == nullptr) return {};
+        return trim_copy(camera_ip);
+    }
+
+    int ensure_camera_for_ip(const std::string& camera_ip) {
+        if (camera_ip.empty()) {
+            spdlog::error("Camera IP is required");
+            return -13;
+        }
+
+        if (g_camera && g_camera->isOpened() && g_camera->getCameraIp() == camera_ip) {
+            return 0;
+        }
+
+        if (g_camera) {
+            spdlog::info("Switching LanxinCamera from ip={} to ip={}",
+                         g_camera->getCameraIp(), camera_ip);
+            g_camera.reset();
+        }
+
+        try {
+            g_camera = std::make_unique<LanxinCamera>(camera_ip);
+        } catch (const std::exception& e) {
+            spdlog::critical("LanxinCamera connection failed, ip={}, error={}", camera_ip, e.what());
+            g_camera.reset();
+            return -11;
+        }
+
+        if (!g_camera->isOpened()) {
+            spdlog::critical("LanxinCamera connection failed, ip={}", camera_ip);
+            g_camera.reset();
+            return -11;
+        }
+
+        spdlog::info("LanxinCamera connected, ip={}", camera_ip);
+        return 0;
     }
 
     bool parse_bool_value(const std::string& value, bool default_value) {
@@ -218,8 +250,6 @@ int bs_yzx_init(const bool is_debug) {
     spdlog::flush_on(spdlog::level::err);
 
     // 默认配置
-    g_run_mode = 0;
-    g_compute_device = 1;
     g_model_path = "models/rfdetr.onnx";
     g_calib_path = "config/params.xml";
     g_cnn_config_path = "cnn.ini";
@@ -238,17 +268,7 @@ int bs_yzx_init(const bool is_debug) {
                 return -25;
             }
 
-            // 读取运行模式和计算设备配置
-            // 如果配置文件中没有这些字段，保留默认值
-            if (!fs_config["RunMode"].empty()) {
-                fs_config["RunMode"] >> g_run_mode;
-            }
-            if (!fs_config["DeviceType"].empty()) {
-                fs_config["DeviceType"] >> g_compute_device;
-            }
-
-            spdlog::info("Initializing... RunMode={} (0=File, 1=Camera), DeviceType={} (1=CPU, 2=GPU)", 
-                         g_run_mode, g_compute_device);
+            spdlog::info("Initializing camera + GPU pipeline");
 
             // 读取内参
             fs_config["intrinsicRGB"] >> g_intrinsic;
@@ -287,21 +307,18 @@ int bs_yzx_init(const bool is_debug) {
             Ort::SessionOptions session_options;
             session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-            // 如果是 GPU 计算模式，配置 CUDA Provider
-            if (g_compute_device == 2) {
-                try {
-                    OrtCUDAProviderOptions cuda_options;
-                    cuda_options.device_id = 0;
-                    cuda_options.arena_extend_strategy = 0;
-                    cuda_options.gpu_mem_limit = SIZE_MAX;
-                    cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
-                    cuda_options.do_copy_in_default_stream = 1;
-                    session_options.AppendExecutionProvider_CUDA(cuda_options);
-                    spdlog::info("CUDA Execution Provider appended.");
-                } catch (const std::exception& e) {
-                    spdlog::error("Failed to append CUDA provider: {}", e.what());
-                    // Fallback to CPU or return error? Let's proceed, ORT might fallback.
-                }
+            try {
+                OrtCUDAProviderOptions cuda_options;
+                cuda_options.device_id = 0;
+                cuda_options.arena_extend_strategy = 0;
+                cuda_options.gpu_mem_limit = SIZE_MAX;
+                cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+                cuda_options.do_copy_in_default_stream = 1;
+                session_options.AppendExecutionProvider_CUDA(cuda_options);
+                spdlog::info("CUDA Execution Provider appended.");
+            } catch (const std::exception& e) {
+                spdlog::critical("Failed to append CUDA provider: {}", e.what());
+                return -31;
             }
             
             auto to_wstring = [](const std::string& s) -> std::wstring {
@@ -328,18 +345,7 @@ int bs_yzx_init(const bool is_debug) {
         }
     }
 
-    // 如果是 相机模式，初始化相机 (无论计算用CPU还是GPU，只要数据源是相机就需要)
-    if (g_run_mode == 1) {
-        if (!g_camera || !g_camera->isOpened()) {
-            g_camera = std::make_unique<LanxinCamera>();
-            if (!g_camera->isOpened()) {
-                spdlog::critical("LanxinCamera connection failed");
-                g_camera.reset();
-                return -2;
-            }
-            spdlog::info("LanxinCamera connected");
-        }
-    }
+    // 相机在识别函数中按传入的 cameraIp 延迟初始化/切换。
 
     return 0;
 }
@@ -456,34 +462,6 @@ int bs_yzx_box_sizeof() {
         oss << std::put_time(&local_tm, "%Y%m%d%H%M%S")
             << std::setw(3) << std::setfill('0') << millis.count();
         return oss.str();
-    }
-
-    std::optional<fs::path> find_latest_input_case_dir() {
-        const fs::path root = g_root_output_dir;
-        if (!fs::exists(root) || !fs::is_directory(root)) {
-            return std::nullopt;
-        }
-
-        std::optional<fs::path> latest_dir;
-        fs::file_time_type latest_time{};
-        for (const auto& entry : fs::directory_iterator(root)) {
-            if (!entry.is_directory()) continue;
-
-            const fs::path case_dir = entry.path();
-            const fs::path rgb_path = case_dir / "rgb_orig.jpg";
-            const fs::path pcd_path = case_dir / "cloud_orig.pcd";
-            if (!fs::exists(rgb_path) || !fs::exists(pcd_path)) continue;
-
-            std::error_code ec;
-            const auto write_time = fs::last_write_time(case_dir, ec);
-            if (ec) continue;
-
-            if (!latest_dir || write_time > latest_time) {
-                latest_dir = case_dir;
-                latest_time = write_time;
-            }
-        }
-        return latest_dir;
     }
 
     /**
@@ -972,12 +950,15 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
 }
 
 
-int bs_yzx_object_detection_lanxin(zzb::Box box_array[]) {
+int bs_yzx_object_detection_lanxin(zzb::Box box_array[], const char *cameraIp) {
     try {
     if (!g_is_pipeline_ready) return -10;
     if (box_array == nullptr) return -12;
-    // 相机模式下必须有相机
-    if (g_run_mode == 1 && (!g_camera || !g_camera->isOpened())) return -11;
+
+    const std::string requested_camera_ip = normalize_camera_ip(cameraIp);
+    if (const int camera_result = ensure_camera_for_ip(requested_camera_ip); camera_result != 0) {
+        return camera_result;
+    }
 
     auto time_start = std::chrono::steady_clock::now();
 
@@ -987,66 +968,38 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[]) {
     fs::path output_dir = fs::path(g_root_output_dir) / timestamp;
 
     // 1. 数据加载 (Data Loading)
-    if (g_run_mode == 0) {
-        // 本地文件模式
-        const auto input_dir = find_latest_input_case_dir();
-        if (!input_dir) {
-            spdlog::error("No input directory found under {}. Expected rgb_orig.jpg and cloud_orig.pcd",
-                          g_root_output_dir);
-            return -21;
-        }
-        spdlog::info("Using input directory: {}", input_dir->string());
+    std::error_code ec;
+    fs::create_directories(output_dir, ec);
 
-        const fs::path rgb_path = *input_dir / "rgb_orig.jpg";
-        image_rgb = cv::imread(rgb_path.string(), cv::IMREAD_COLOR);
-        if (image_rgb.empty()) {
-            spdlog::error("Cannot read RGB image: {}", rgb_path.string());
-            return -22;
-        }
-
-        const fs::path pcd_path = *input_dir / "cloud_orig.pcd";
-        if (pcl::io::loadPCDFile(pcd_path.string(), *point_cloud) == -1 || point_cloud->empty()) {
-            spdlog::error("Cannot read point cloud data: {}", pcd_path.string());
-            return -23;
-        }
-        std::error_code ec;
-        fs::create_directories(output_dir, ec);
-    } else {
-        // 相机模式
-        // 确保输出目录存在
-        std::error_code ec;
-        fs::create_directories(output_dir, ec);
-
-        if (g_camera->CapFrame(image_rgb) != 0 || image_rgb.empty()) {
-            spdlog::error("Failed to capture RGB frame");
-            return -22;
-        }
-
-        // 异步保存原始 RGB
-        const fs::path rgbPath = output_dir / "rgb_orig.jpg";
-        // 深拷贝图像，防止主线程后续处理修改了 image_rgb 导致保存出错
-        cv::Mat image_rgb_clone = image_rgb.clone(); 
-        std::thread([rgbPath, image_rgb_clone]() {
-            if (!cv::imwrite(rgbPath.string(), image_rgb_clone)) {
-                spdlog::warn("Failed to save original RGB");
-            }
-        }).detach(); // detach() 实现“阅后即焚”，不阻塞主线程
-
-        if (g_camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
-            spdlog::error("Failed to capture point cloud or empty");
-            return -23;
-        }
-
-        // 异步保存原始点云
-        const fs::path pcdPath = output_dir / "cloud_orig.pcd";
-        // 深拷贝点云，防止主线程后续处理修改了 point_cloud
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_clone(new pcl::PointCloud<pcl::PointXYZ>(*point_cloud));
-        std::thread([pcdPath, cloud_clone]() {
-            pcl::io::savePCDFileASCII(pcdPath.string(), *cloud_clone);
-            // 额外建议：如果不需要人类可读，强烈建议改成二进制保存，速度快得多，文件也小：
-            // pcl::io::savePCDFileBinary(pcdPath.string(), *cloud_clone);
-        }).detach();
+    if (g_camera->CapFrame(image_rgb) != 0 || image_rgb.empty()) {
+        spdlog::error("Failed to capture RGB frame");
+        return -22;
     }
+
+    // 异步保存原始 RGB
+    const fs::path rgbPath = output_dir / "rgb_orig.jpg";
+    // 深拷贝图像，防止主线程后续处理修改了 image_rgb 导致保存出错
+    cv::Mat image_rgb_clone = image_rgb.clone();
+    std::thread([rgbPath, image_rgb_clone]() {
+        if (!cv::imwrite(rgbPath.string(), image_rgb_clone)) {
+            spdlog::warn("Failed to save original RGB");
+        }
+    }).detach(); // detach() 实现“阅后即焚”，不阻塞主线程
+
+    if (g_camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
+        spdlog::error("Failed to capture point cloud or empty");
+        return -23;
+    }
+
+    // 异步保存原始点云
+    const fs::path pcdPath = output_dir / "cloud_orig.pcd";
+    // 深拷贝点云，防止主线程后续处理修改了 point_cloud
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_clone(new pcl::PointCloud<pcl::PointXYZ>(*point_cloud));
+    std::thread([pcdPath, cloud_clone]() {
+        pcl::io::savePCDFileASCII(pcdPath.string(), *cloud_clone);
+        // 额外建议：如果不需要人类可读，强烈建议改成二进制保存，速度快得多，文件也小：
+        // pcl::io::savePCDFileBinary(pcdPath.string(), *cloud_clone);
+    }).detach();
 
     // 2. 推理检测 (Inference)
     auto t1 = std::chrono::steady_clock::now();
@@ -1140,9 +1093,9 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[]) {
     auto t6 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 6: Output {:.3f} ms", std::chrono::duration<double, std::milli>(t6 - t5).count());
 
-    spdlog::info("[ OK ] timestamp={} -> {}, targets={} (written {}), time={:.3f} ms, Mode={}, Device={}",
+    spdlog::info("[ OK ] timestamp={} -> {}, targets={} (written {}), time={:.3f} ms, Mode=Camera, Device=GPU, CameraIp={}",
              timestamp, vis_out_path.string(), total_results, num_to_write, elapsed_ms, 
-             (g_run_mode==0 ? "File" : "Camera"), (g_compute_device==1 ? "CPU" : "GPU"));
+             requested_camera_ip);
 
     return num_to_write;
     } catch (const Ort::Exception& e) {

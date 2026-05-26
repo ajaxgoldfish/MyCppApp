@@ -1,18 +1,20 @@
 #include "LanxinCamera.h"
+#include <chrono>
 #include <spdlog/spdlog.h>
+#include <stdexcept>
+#include <thread>
 
 static void checkTC(LX_STATE val) {
     if (val != LX_SUCCESS) {
-        std::string string = std::string("LanxinCamera error :") + DcGetErrorString(val);
-        spdlog::error(string);
-        throw std::runtime_error(string);
+        std::string message = std::string("LanxinCamera error: ") + DcGetErrorString(val);
+        spdlog::error("{}", message);
+        throw std::runtime_error(message);
     }
 }
 
 int LanxinCamera::connect() {
     // 查找相机
     int device_num = 0;
-    LxDeviceInfo *p_device_list = nullptr;
     checkTC(DcGetDeviceList(&p_device_list, &device_num));
     if (device_num <= 0) {
         spdlog::warn("未发现任何设备");
@@ -20,69 +22,91 @@ int LanxinCamera::connect() {
     }
 
     LxDeviceInfo device_info;
-    int open_mode = OPEN_BY_INDEX;
-    const LX_STATE lx_state = DcOpenDevice(static_cast<LX_OPEN_MODE>(open_mode), "0", &handle, &device_info);
+    const auto open_mode = static_cast<LX_OPEN_MODE>(OPEN_BY_IP);
+    const char *open_param = camera_ip_.c_str();
+    spdlog::info("Opening LanxinCamera by ip: {}", open_param);
+
+    const LX_STATE lx_state = DcOpenDevice(open_mode, open_param, &handle, &device_info);
     if (LX_SUCCESS != lx_state) {
-        spdlog::error("打开 LanxinCamera 设备失败");
+        spdlog::error("打开 LanxinCamera 设备失败, open_param={}, error={}", open_param, DcGetErrorString(lx_state));
         return -1;
     }
 
-    spdlog::info("device_info\n cameraid:{}\n uniqueid:{}\n cameraip:{}\n firmware_ver:{}\n sn:{}\n name:{}\n img_algor_ver:{}",
-                 device_info.id, handle, device_info.ip, device_info.firmware_ver, device_info.sn,
-                 device_info.name, device_info.algor_ver);
+    bool stream_started = false;
+    auto cleanup_open_handle = [&]() {
+        if (handle != 0) {
+            if (stream_started) {
+                DcStopStream(handle);
+            }
+            DcCloseDevice(handle);
+            handle = 0;
+        }
+        isConnect = false;
+    };
 
-    // 设置数据流
-    bool test_depth = true, test_amp = true, test_rgb = true;
-    checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_3D_DEPTH_STREAM, test_depth));
-    //checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_3D_AMP_STREAM, test_amp));
-    checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, test_rgb));
+    try {
+        spdlog::info("device_info\n cameraid:{}\n uniqueid:{}\n cameraip:{}\n firmware_ver:{}\n sn:{}\n name:{}\n img_algor_ver:{}",
+                     device_info.id, handle, device_info.ip, device_info.firmware_ver, device_info.sn,
+                     device_info.name, device_info.algor_ver);
 
-    checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_3D_DEPTH_STREAM, &test_depth));
-    //checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_3D_AMP_STREAM, &test_amp));
-    checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, &test_rgb));
-    spdlog::info("test_depth:{} test_amp:{} test_rgb:{}", test_depth, test_amp, test_rgb);
+        // 设置数据流
+        bool test_depth = true, test_amp = true, test_rgb = true;
+        checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_3D_DEPTH_STREAM, test_depth));
+        //checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_3D_AMP_STREAM, test_amp));
+        checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, test_rgb));
 
-    // RGBD 对齐
-    checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_TO_DEPTH, true));
+        checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_3D_DEPTH_STREAM, &test_depth));
+        //checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_3D_AMP_STREAM, &test_amp));
+        checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, &test_rgb));
+        spdlog::info("test_depth:{} test_amp:{} test_rgb:{}", test_depth, test_amp, test_rgb);
 
-    // 获取图像参数
-    LxIntValueInfo int_value;
-    checkTC(DcGetIntValue(handle, LX_INT_3D_IMAGE_WIDTH, &int_value));
-    this->tof_width = int_value.cur_value;
-    checkTC(DcGetIntValue(handle, LX_INT_3D_IMAGE_HEIGHT, &int_value));
-    this->tof_height = int_value.cur_value;
-    checkTC(DcGetIntValue(handle, LX_INT_3D_DEPTH_DATA_TYPE, &int_value));
-    this->tof_depth_type = int_value.cur_value;
-    checkTC(DcGetIntValue(handle, LX_INT_3D_AMPLITUDE_DATA_TYPE, &int_value));
-    this->tof_amp_type = int_value.cur_value;
-    checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_WIDTH, &int_value));
-    this->rgb_width = int_value.cur_value;
-    checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_HEIGHT, &int_value));
-    this->rgb_height = int_value.cur_value;
-    checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_CHANNEL, &int_value));
-    this->rgb_channles = int_value.cur_value;
-    checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_DATA_TYPE, &int_value));
-    this->rgb_data_type = int_value.cur_value;
+        // RGBD 对齐
+        checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_TO_DEPTH, true));
 
-    // 开启数据流
-    checkTC(DcStartStream(handle));
-    spdlog::info("DcStartStream 完成");
+        // 获取图像参数
+        LxIntValueInfo int_value;
+        checkTC(DcGetIntValue(handle, LX_INT_3D_IMAGE_WIDTH, &int_value));
+        this->tof_width = int_value.cur_value;
+        checkTC(DcGetIntValue(handle, LX_INT_3D_IMAGE_HEIGHT, &int_value));
+        this->tof_height = int_value.cur_value;
+        checkTC(DcGetIntValue(handle, LX_INT_3D_DEPTH_DATA_TYPE, &int_value));
+        this->tof_depth_type = int_value.cur_value;
+        checkTC(DcGetIntValue(handle, LX_INT_3D_AMPLITUDE_DATA_TYPE, &int_value));
+        this->tof_amp_type = int_value.cur_value;
+        checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_WIDTH, &int_value));
+        this->rgb_width = int_value.cur_value;
+        checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_HEIGHT, &int_value));
+        this->rgb_height = int_value.cur_value;
+        checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_CHANNEL, &int_value));
+        this->rgb_channles = int_value.cur_value;
+        checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_DATA_TYPE, &int_value));
+        this->rgb_data_type = int_value.cur_value;
 
-    float *param_data = nullptr;
-    if (LX_SUCCESS != DcGetPtrValue(handle, LX_PTR_2D_INTRIC_PARAM, reinterpret_cast<void **>(&param_data))) {
-        spdlog::error("获取相机内参失败");
-        return -2;
+        // 开启数据流
+        checkTC(DcStartStream(handle));
+        stream_started = true;
+        spdlog::info("DcStartStream 完成");
+
+        float *param_data = nullptr;
+        if (LX_SUCCESS != DcGetPtrValue(handle, LX_PTR_2D_INTRIC_PARAM, reinterpret_cast<void **>(&param_data))) {
+            spdlog::error("获取相机内参失败");
+            cleanup_open_handle();
+            return -2;
+        }
+
+        param = cv::Mat::zeros(3, 3, CV_32FC1);
+        param.at<float>(0) = *(param_data + 0);
+        param.at<float>(2) = *(param_data + 2);
+        param.at<float>(4) = *(param_data + 1);
+        param.at<float>(5) = *(param_data + 3);
+        param.at<float>(8) = 1;
+
+        isConnect = true;
+        return 0;
+    } catch (...) {
+        cleanup_open_handle();
+        throw;
     }
-
-    param = cv::Mat::zeros(3, 3, CV_32FC1);
-    param.at<float>(0) = *(param_data + 0);
-    param.at<float>(2) = *(param_data + 2);
-    param.at<float>(4) = *(param_data + 1);
-    param.at<float>(5) = *(param_data + 3);
-    param.at<float>(8) = 1;
-
-    isConnect = true;
-    return 0;
 }
 
 int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {

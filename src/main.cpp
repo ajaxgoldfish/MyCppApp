@@ -7,11 +7,16 @@
 #include <windows.h>
 #endif
 
-int main() {
+int main(int argc, char *argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 #endif
+
+    if (argc <= 1) {
+        spdlog::error("Camera IP is required. Usage: MyCppApp.exe <camera_ip>");
+        return -1;
+    }
 
     const bool isDebug = true;
     const int init_result = bs_yzx_init(isDebug);
@@ -22,9 +27,10 @@ int main() {
 
     constexpr int MAX_BOXES = 100;
     zzb::Box boxArr[MAX_BOXES]{};
+    const char *cameraIp = argv[1];
 
     const auto t0 = std::chrono::steady_clock::now();
-    const int detection_result = bs_yzx_object_detection_lanxin(boxArr);
+    const int detection_result = bs_yzx_object_detection_lanxin(boxArr, cameraIp);
     const auto t1 = std::chrono::steady_clock::now();
     const double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
