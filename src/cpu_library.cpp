@@ -19,7 +19,9 @@
 #include <fstream>
 #include <cctype>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
+#include <sstream>
 #include <spdlog/spdlog.h>
 #include <opencv2/opencv.hpp>
 #include <memory>
@@ -435,6 +437,53 @@ int bs_yzx_box_sizeof() {
         }
         oss << "]";
         return oss.str();
+    }
+
+    std::string make_timestamp_dir_name() {
+        const auto now = std::chrono::system_clock::now();
+        const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+
+        std::tm local_tm{};
+#ifdef _WIN32
+        localtime_s(&local_tm, &now_time);
+#else
+        localtime_r(&now_time, &local_tm);
+#endif
+
+        std::ostringstream oss;
+        oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S")
+            << "_" << std::setw(3) << std::setfill('0') << millis.count();
+        return oss.str();
+    }
+
+    std::optional<fs::path> find_latest_input_case_dir() {
+        const fs::path root = g_root_output_dir;
+        if (!fs::exists(root) || !fs::is_directory(root)) {
+            return std::nullopt;
+        }
+
+        std::optional<fs::path> latest_dir;
+        fs::file_time_type latest_time{};
+        for (const auto& entry : fs::directory_iterator(root)) {
+            if (!entry.is_directory()) continue;
+
+            const fs::path case_dir = entry.path();
+            const fs::path rgb_path = case_dir / "rgb_orig.jpg";
+            const fs::path pcd_path = case_dir / "cloud_orig.pcd";
+            if (!fs::exists(rgb_path) || !fs::exists(pcd_path)) continue;
+
+            std::error_code ec;
+            const auto write_time = fs::last_write_time(case_dir, ec);
+            if (ec) continue;
+
+            if (!latest_dir || write_time > latest_time) {
+                latest_dir = case_dir;
+                latest_time = write_time;
+            }
+        }
+        return latest_dir;
     }
 
     /**
@@ -923,7 +972,7 @@ static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPose
 }
 
 
-int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
+int bs_yzx_object_detection_lanxin(zzb::Box box_array[]) {
     try {
     if (!g_is_pipeline_ready) return -10;
     if (box_array == nullptr) return -12;
@@ -934,33 +983,39 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
 
     cv::Mat image_rgb;
     pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    fs::path case_dir = fs::path(g_root_output_dir) / std::to_string(task_id);
+    const std::string timestamp = make_timestamp_dir_name();
+    fs::path output_dir = fs::path(g_root_output_dir) / timestamp;
 
     // 1. 数据加载 (Data Loading)
     if (g_run_mode == 0) {
         // 本地文件模式
-        if (!fs::exists(case_dir)) {
-            spdlog::error("Data directory does not exist: {}", case_dir.string());
+        const auto input_dir = find_latest_input_case_dir();
+        if (!input_dir) {
+            spdlog::error("No input directory found under {}. Expected rgb_orig.jpg and cloud_orig.pcd",
+                          g_root_output_dir);
             return -21;
         }
+        spdlog::info("Using input directory: {}", input_dir->string());
 
-        const fs::path rgb_path = case_dir / "rgb_orig.jpg";
+        const fs::path rgb_path = *input_dir / "rgb_orig.jpg";
         image_rgb = cv::imread(rgb_path.string(), cv::IMREAD_COLOR);
         if (image_rgb.empty()) {
             spdlog::error("Cannot read RGB image: {}", rgb_path.string());
             return -22;
         }
 
-        const fs::path pcd_path = case_dir / "cloud_orig.pcd";
+        const fs::path pcd_path = *input_dir / "cloud_orig.pcd";
         if (pcl::io::loadPCDFile(pcd_path.string(), *point_cloud) == -1 || point_cloud->empty()) {
             spdlog::error("Cannot read point cloud data: {}", pcd_path.string());
             return -23;
         }
+        std::error_code ec;
+        fs::create_directories(output_dir, ec);
     } else {
         // 相机模式
         // 确保输出目录存在
         std::error_code ec;
-        fs::create_directories(case_dir, ec);
+        fs::create_directories(output_dir, ec);
 
         if (g_camera->CapFrame(image_rgb) != 0 || image_rgb.empty()) {
             spdlog::error("Failed to capture RGB frame");
@@ -968,7 +1023,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
         }
 
         // 异步保存原始 RGB
-        const fs::path rgbPath = case_dir / "rgb_orig.jpg";
+        const fs::path rgbPath = output_dir / "rgb_orig.jpg";
         // 深拷贝图像，防止主线程后续处理修改了 image_rgb 导致保存出错
         cv::Mat image_rgb_clone = image_rgb.clone(); 
         std::thread([rgbPath, image_rgb_clone]() {
@@ -983,7 +1038,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
         }
 
         // 异步保存原始点云
-        const fs::path pcdPath = case_dir / "cloud_orig.pcd";
+        const fs::path pcdPath = output_dir / "cloud_orig.pcd";
         // 深拷贝点云，防止主线程后续处理修改了 point_cloud
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_clone(new pcl::PointCloud<pcl::PointXYZ>(*point_cloud));
         std::thread([pcdPath, cloud_clone]() {
@@ -1053,7 +1108,7 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
     auto t5 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 5: Visualize Results took {:.3f} ms", std::chrono::duration<double, std::milli>(t5 - t4).count());
 
-    const fs::path vis_out_path = case_dir / "vis_on_orig.jpg";
+    const fs::path vis_out_path = output_dir / "vis_on_orig.jpg";
     cv::imwrite(vis_out_path.string(), vis_image);
 
     auto time_end = std::chrono::steady_clock::now();
@@ -1084,11 +1139,12 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
 
     // 写入 JSON
     json json_root;
-    json_root["taskId"] = task_id;
+    json_root["timestamp"] = timestamp;
     json_root["elapsed_ms"] = elapsed_ms;
     json_root["total"] = total_results;
     json_root["run_mode"] = g_run_mode;
     json_root["device_type"] = g_compute_device;
+    json_root["out_image"] = vis_out_path.string();
     json_root["boxes"] = json::array();
     for (int i = 0; i < num_to_write; ++i) {
         const auto &b = box_array[i];
@@ -1100,14 +1156,14 @@ int bs_yzx_object_detection_lanxin(int task_id, zzb::Box box_array[]) {
         });
     }
     
-    std::ofstream ofs(case_dir / "boxes.json");
+    std::ofstream ofs(output_dir / "boxes.json");
     if (ofs.is_open()) ofs << std::setw(2) << json_root;
 
     auto t6 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 6: Output & JSON Write took {:.3f} ms", std::chrono::duration<double, std::milli>(t6 - t5).count());
 
-    spdlog::info("[ OK ] taskId={} -> {}, targets={} (written {}), time={:.3f} ms, Mode={}, Device={}",
-             task_id, vis_out_path.string(), total_results, num_to_write, elapsed_ms, 
+    spdlog::info("[ OK ] timestamp={} -> {}, targets={} (written {}), time={:.3f} ms, Mode={}, Device={}",
+             timestamp, vis_out_path.string(), total_results, num_to_write, elapsed_ms, 
              (g_run_mode==0 ? "File" : "Camera"), (g_compute_device==1 ? "CPU" : "GPU"));
 
     return num_to_write;
