@@ -453,8 +453,8 @@ int bs_yzx_box_sizeof() {
 #endif
 
         std::ostringstream oss;
-        oss << std::put_time(&local_tm, "%Y%m%d_%H%M%S")
-            << "_" << std::setw(3) << std::setfill('0') << millis.count();
+        oss << std::put_time(&local_tm, "%Y%m%d%H%M%S")
+            << std::setw(3) << std::setfill('0') << millis.count();
         return oss.str();
     }
 
