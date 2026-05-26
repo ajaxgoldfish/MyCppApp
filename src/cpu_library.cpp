@@ -1137,30 +1137,8 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[]) {
         dst.rw7 = rot(2,0); dst.rw8 = rot(2,1); dst.rw9 = rot(2,2);
     }
 
-    // 写入 JSON
-    json json_root;
-    json_root["timestamp"] = timestamp;
-    json_root["elapsed_ms"] = elapsed_ms;
-    json_root["total"] = total_results;
-    json_root["run_mode"] = g_run_mode;
-    json_root["device_type"] = g_compute_device;
-    json_root["out_image"] = vis_out_path.string();
-    json_root["boxes"] = json::array();
-    for (int i = 0; i < num_to_write; ++i) {
-        const auto &b = box_array[i];
-        json_root["boxes"].push_back({ 
-            {"id", b.id},
-            {"x", b.x}, {"y", b.y}, {"z", b.z},
-            {"w", b.width}, {"h", b.height},
-            {"W", b.angle_a}, {"P", b.angle_b}, {"R", b.angle_c}
-        });
-    }
-    
-    std::ofstream ofs(output_dir / "boxes.json");
-    if (ofs.is_open()) ofs << std::setw(2) << json_root;
-
     auto t6 = std::chrono::steady_clock::now();
-    spdlog::info("[Timing] Step 6: Output & JSON Write took {:.3f} ms", std::chrono::duration<double, std::milli>(t6 - t5).count());
+    spdlog::info("[Timing] Step 6: Output {:.3f} ms", std::chrono::duration<double, std::milli>(t6 - t5).count());
 
     spdlog::info("[ OK ] timestamp={} -> {}, targets={} (written {}), time={:.3f} ms, Mode={}, Device={}",
              timestamp, vis_out_path.string(), total_results, num_to_write, elapsed_ms, 
