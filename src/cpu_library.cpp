@@ -13,6 +13,7 @@
 #include <array>
 #include <iomanip>
 #include <cmath>
+#include <limits>
 #include <opencv2/dnn.hpp>
 #include <algorithm>
 #include <optional>
@@ -38,61 +39,60 @@ namespace fs = std::filesystem;
 #endif
 
 namespace {
-    // ==========================================
-    // 全局配置与资源 (Global Configuration)
-    // ==========================================
+    // 全局配置保存模型路径、阈值和 RF-DETR 后处理策略。
+    // 初始化时从 cnn.ini 覆盖默认值，后续推理、mask 生成和可视化都依赖这些参数保持一致。
     std::string g_model_path;
     std::string g_cnn_config_path;
-    float g_score_threshold = 0.65f;   // 置信度阈值
-    float g_mask_threshold = 0.5f;    // Mask二值化阈值
-    bool g_paint_masks_on_vis = true; // 是否在可视化图中绘制Mask
+    float g_score_threshold = 0.65f;
+    float g_mask_threshold = 0.5f;
+    bool g_paint_masks_on_vis = true;
     int g_rfdetr_input_width = 560;
     int g_rfdetr_input_height = 560;
     bool g_rfdetr_exclude_last_class = false;
     bool g_rfdetr_clip_masks_to_boxes = false;
     std::string g_rfdetr_score_activation = "sigmoid";
+    std::string g_rfdetr_mask_output = "logits";
 
-    // 相机内参和外参
+    // 标定矩阵把 RGB 像素、相机点云和世界坐标连接起来，是后续 3D 位姿解算的基础。
     cv::Mat g_intrinsic;
 
-    // 相机设备 (相机模式使用)
+    // 相机对象按传入 IP 延迟创建，便于同一进程中复用连接或切换设备。
     std::unique_ptr<LanxinCamera> g_camera;
 
-    // 本地计算结果结构体
+    // 单个目标的完整中间结果，既用于写回 DLL 输出，也用于在原图上绘制调试信息。
     struct LocalBoxPoseResult {
         int id = -1;
         cv::Point3f xyz_mm{};
         cv::Vec3f wpr_deg{};
         float width_mm = 0.f;
         float height_mm = 0.f;
-        std::array<cv::Point2f, 4> quad_pts;  // 凸包四点 (像素)
+        std::array<cv::Point2f, 4> quad_pts;
         cv::Point2f bottom_mid_px{};
         cv::Point3f p1_w_mm{}, p2_w_mm{}, p3_w_mm{};
         Eigen::Matrix3d rotation_matrix_world;
     };
 
-    // ==========================================
-    // ONNX Runtime 全局状态
-    // ==========================================
+    // ONNX Runtime 会话和输入输出名称只初始化一次，避免每帧重复加载模型。
     std::unique_ptr<Ort::Env> g_env;
     std::unique_ptr<Ort::Session> g_session;
     std::string g_input_name;
     std::vector<std::string> g_output_names_str;
     std::vector<const char *> g_output_names_ptr;
     
-    // 缓存矩阵 (K: 内参, Twc: 外参)
+    // 缓存常用矩阵，后续像素反投影和相机到世界坐标转换都直接使用。
     cv::Mat g_mat_k, g_mat_k_inv, g_mat_twc; 
     bool g_is_pipeline_ready = false;
-    std::string g_root_output_dir = "res"; // 可视化输出根目录
+    std::string g_root_output_dir = "res";
 
-    // 点云投影映射结构
+    // 点云投影表记录每个 3D 点落到哪个 RGB 像素，后续可快速从 2D mask 找回对应点云。
     struct ProjectionMap {
-        int u, v;  // 像素坐标
-        int point_idx; // 对应的点云索引
+        int u, v;
+        int point_idx;
     };
 
+    // 2D 检测结果保存 mask 提取出的四边形和底边中心，为 3D 射线求交提供关键像素点。
     struct DetectionResult2D {
-        std::array<cv::Point2f, 4> quad_pts;  // 凸包四点 (顺时针)
+        std::array<cv::Point2f, 4> quad_pts;
         cv::Point2f bottom_mid_px;
     };
 
@@ -125,6 +125,8 @@ namespace {
         return trim_copy(path);
     }
 
+    // 读取外部标定文件，校验内参与外参格式，并缓存反投影和坐标变换所需矩阵。
+    // 这个步骤保证后续能把 2D 检测结果稳定转换到相机坐标和世界坐标。
     int load_calibration_from_path(const std::string& calibration_path) {
         if (calibration_path.empty()) {
             spdlog::error("Intrinsic/extrinsic path is required");
@@ -171,6 +173,8 @@ namespace {
         return 0;
     }
 
+    // 根据本次调用传入的 IP 获取相机连接。
+    // 如果已连接同一台设备则直接复用，减少重复初始化开销；如果 IP 改变则重新连接。
     int ensure_camera_for_ip(const std::string& camera_ip) {
         if (camera_ip.empty()) {
             spdlog::error("Camera IP is required");
@@ -205,6 +209,7 @@ namespace {
         return 0;
     }
 
+    // 配置文件里布尔值允许多种写法，统一解析后供初始化逻辑使用。
     bool parse_bool_value(const std::string& value, bool default_value) {
         const auto lowered = lower_copy(trim_copy(value));
         if (lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on") return true;
@@ -212,6 +217,8 @@ namespace {
         return default_value;
     }
 
+    // 加载 CNN/RF-DETR 配置，统一管理模型路径、输入尺寸、分类阈值和 mask 后处理方式。
+    // 这些配置决定推理候选框如何过滤，以及低分辨率 mask logits 如何还原到原图。
     void load_cnn_config() {
         std::ifstream file(g_cnn_config_path);
         if (!file.is_open()) {
@@ -270,6 +277,14 @@ namespace {
                         spdlog::warn("[init] Unsupported score_activation '{}', use {}",
                                      value, g_rfdetr_score_activation);
                     }
+                } else if (key_lower == "mask_output" || key_lower == "rfdetr_mask_output") {
+                    const auto output_type = lower_copy(value);
+                    if (output_type == "logits" || output_type == "probability" || output_type == "probabilities") {
+                        g_rfdetr_mask_output = (output_type == "logits") ? "logits" : "probability";
+                    } else {
+                        spdlog::warn("[init] Unsupported mask_output '{}', use {}",
+                                     value, g_rfdetr_mask_output);
+                    }
                 } else if (key_lower == "exclude_last_class" || key_lower == "rfdetr_exclude_last_class") {
                     g_rfdetr_exclude_last_class = parse_bool_value(value, g_rfdetr_exclude_last_class);
                 } else if (key_lower == "clip_masks_to_boxes" || key_lower == "rfdetr_clip_masks_to_boxes") {
@@ -280,30 +295,32 @@ namespace {
             }
         }
 
-        spdlog::info("[init] RF-DETR model={}, input={}x{}, score_threshold={}, mask_threshold={}, activation={}, exclude_last_class={}, clip_masks_to_boxes={}",
+        spdlog::info("[init] RF-DETR model={}, input={}x{}, score_threshold={}, mask_threshold={}, activation={}, mask_output={}, exclude_last_class={}, clip_masks_to_boxes={}",
                      g_model_path, g_rfdetr_input_width, g_rfdetr_input_height,
-                     g_score_threshold, g_mask_threshold, g_rfdetr_score_activation,
+                     g_score_threshold, g_mask_threshold, g_rfdetr_score_activation, g_rfdetr_mask_output,
                      g_rfdetr_exclude_last_class, g_rfdetr_clip_masks_to_boxes);
     }
 
-} // namespace
+} // 匿名命名空间
 
 
 /**
- * @brief 初始化算法流水线
- * @param is_debug 是否开启调试日志
+ * 初始化算法流水线。
+ * 负责加载配置、创建 ONNX Runtime GPU 会话并缓存模型输入输出信息；
+ * 相机和标定文件在检测接口中按实际参数加载，方便运行时切换设备或标定。
  */
 int bs_yzx_init(const bool is_debug) {
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
     spdlog::set_level(is_debug ? spdlog::level::debug : spdlog::level::info);
     spdlog::flush_on(spdlog::level::err);
 
-    // 默认配置
+    // 默认值提供可运行的兜底配置，随后由 cnn.ini 覆盖。
     g_model_path = "models/rfdetr.onnx";
     g_cnn_config_path = "cnn.ini";
     g_score_threshold = 0.7f;
     g_mask_threshold = 0.5f;
     g_paint_masks_on_vis = true;
+    g_rfdetr_mask_output = "logits";
 
     if (!g_is_pipeline_ready) {
         try {
@@ -356,7 +373,7 @@ int bs_yzx_init(const bool is_debug) {
         }
     }
 
-    // 相机在识别函数中按传入的 cameraIp 延迟初始化/切换。
+    // 相机连接依赖调用方传入的 IP，因此放到检测阶段创建或切换。
 
     return 0;
 }
@@ -365,12 +382,17 @@ int bs_yzx_box_sizeof() {
     return static_cast<int>(sizeof(zzb::Box));
 }
 
-    // ------------------------------------------------------------------------------------------------
-    // 辅助函数: 数据预处理 (Preprocessing)
-    // ------------------------------------------------------------------------------------------------
+    // 以下工具函数负责数值变换、ONNX 输出匹配和时间戳生成。
+    // 它们把推理输出统一整理成后续 mask、框和保存目录都能直接使用的格式。
 
     float sigmoid(float value) {
         return 1.0f / (1.0f + std::exp(-value));
+    }
+
+    float probability_threshold_to_logit(float threshold) {
+        if (threshold <= 0.0f) return -std::numeric_limits<float>::infinity();
+        if (threshold >= 1.0f) return std::numeric_limits<float>::infinity();
+        return std::log(threshold / (1.0f - threshold));
     }
 
     size_t find_output_index(const std::vector<std::string>& preferred_names, size_t fallback_index) {
@@ -476,7 +498,9 @@ int bs_yzx_box_sizeof() {
     }
 
     /**
-     * @brief 执行 RF-DETR Seg ONNX 推理并返回原图尺寸的实例Mask
+     * 执行 RF-DETR Seg ONNX 推理，并把通过置信度过滤的实例 mask 还原到原图尺寸。
+     * RF-DETR 导出的 mask 通常是低分辨率 logits，这里先双线性放大 logits，再按阈值二值化，
+     * 使 ONNXRuntime 的 mask 边界尽量接近 PyTorch model.predict() 的后处理效果。
      */
     static std::vector<cv::Mat1b> run_inference_and_get_masks(const cv::Mat& image_rgb) {
         std::vector<cv::Mat1b> detected_masks;
@@ -582,31 +606,19 @@ int bs_yzx_box_sizeof() {
             const cv::Rect box_rect = box_cxcywh_to_rect(box_data + i * 4, image_rgb.size());
             if (box_rect.area() <= 0) continue;
 
+            cv::Mat1b full_mask;
             const float *curr_mask_ptr = mask_data + i * mask_area;
-            cv::Mat mask_raw(mask_h, mask_w, CV_32F, const_cast<float *>(curr_mask_ptr));
-
-            double min_value = 0.0, max_value = 0.0;
-            cv::minMaxLoc(mask_raw, &min_value, &max_value);
-            const bool mask_is_logits = min_value < 0.0 || max_value > 1.0;
-
-            cv::Mat mask_prob(mask_h, mask_w, CV_32F);
-            if (mask_is_logits) {
-                for (int y = 0; y < mask_h; ++y) {
-                    const float *src = mask_raw.ptr<float>(y);
-                    float *dst = mask_prob.ptr<float>(y);
-                    for (int x = 0; x < mask_w; ++x) {
-                        dst[x] = sigmoid(src[x]);
-                    }
-                }
-            } else {
-                mask_raw.copyTo(mask_prob);
-            }
+            cv::Mat mask_low_res(mask_h, mask_w, CV_32F, const_cast<float *>(curr_mask_ptr));
 
             cv::Mat mask_resized;
-            cv::resize(mask_prob, mask_resized, image_rgb.size(), 0, 0, cv::INTER_LINEAR);
+            cv::resize(mask_low_res, mask_resized, image_rgb.size(), 0, 0, cv::INTER_LINEAR);
 
-            cv::Mat1b full_mask;
-            cv::compare(mask_resized, g_mask_threshold, full_mask, cv::CMP_GT);
+            if (g_rfdetr_mask_output == "probability") {
+                cv::compare(mask_resized, g_mask_threshold, full_mask, cv::CMP_GT);
+            } else {
+                const float logit_threshold = probability_threshold_to_logit(g_mask_threshold);
+                cv::compare(mask_resized, logit_threshold, full_mask, cv::CMP_GT);
+            }
 
             if (g_rfdetr_clip_masks_to_boxes) {
                 cv::Mat1b clipped(image_rgb.rows, image_rgb.cols, static_cast<uchar>(0));
@@ -622,7 +634,8 @@ int bs_yzx_box_sizeof() {
     }
 
 /**
- * @brief 将点云投影到图像平面 (PCL 版本)
+ * 将相机点云投影到 RGB 图像平面。
+ * 生成的像素到点云索引用于后续从 2D 分割区域中快速筛出目标物体的 3D 点。
  */
 static std::vector<ProjectionMap> project_point_cloud_to_image(
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, const cv::Size& img_size) 
@@ -638,7 +651,7 @@ static std::vector<ProjectionMap> project_point_cloud_to_image(
     #pragma omp parallel
     {
         std::vector<ProjectionMap> local_map;
-        // 预分配足够的空间，避免频繁扩容
+        // 每个线程先写入本地缓存，最后合并，减少并行投影时的锁竞争。
         local_map.reserve(pc->points.size() / 4); 
         
         #pragma omp for nowait
@@ -663,7 +676,8 @@ static std::vector<ProjectionMap> project_point_cloud_to_image(
 }
 
 /**
- * @brief 从 Mask 提取凸包四点及底边中点
+ * 从二值 mask 中提取稳定的 2D 几何描述。
+ * 凸包和四边形近似为后续选择关键像素点提供边界，底边中心用于结果展示和定位参考。
  */
 static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& mask) {
     if (mask.empty()) return std::nullopt;
@@ -681,14 +695,14 @@ static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& 
     } else if (hull.size() >= 3) {
         float arc_len = cv::arcLength(hull, true);
         if (arc_len < 1e-6f) return std::nullopt;
-        // 尝试多种 epsilon，放宽拟合限制
+        // 逐步放宽轮廓近似精度，优先得到可用于位姿估计的四边形。
         const float eps_ratios[] = {0.01f, 0.02f, 0.03f, 0.05f, 0.1f, 0.2f};
         for (float r : eps_ratios) {
             cv::approxPolyDP(hull, quad, r * arc_len, true);
             if (quad.size() == 4) break;
         }
         if (quad.size() != 4) {
-            // 仍无 4 点，用最小外接矩形兜底
+            // 轮廓不规则时使用最小外接矩形兜底，保证后续仍有四个角点可用。
             cv::RotatedRect rr = cv::minAreaRect(hull);
             cv::Point2f pts4[4];
             rr.points(pts4);
@@ -698,7 +712,7 @@ static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& 
         return std::nullopt;
     }
 
-    // 找底边 (y 最大)
+    // 图像坐标中 y 越大越靠下，因此选择平均 y 最大的边作为底边。
     int i0 = 0, i1 = 1;
     float max_y = -1e30f;
     auto check = [&](int a, int b) {
@@ -713,32 +727,28 @@ static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& 
     return res;
 }
 
-// ------------------------------------------------------------------------------------------------
-// 核心函数: 位姿解算 (Pose Estimation)
-// ------------------------------------------------------------------------------------------------
-
 /**
- * @brief 对单个物体进行 6D 位姿解算 (含 RANSAC 平面拟合与坐标变换)
+ * 对单个分割目标进行 3D 位姿和尺寸解算。
+ * 流程是：用 2D 四边形筛选点云，RANSAC 拟合目标平面，再让关键像素射线与平面求交；
+ * 最后把相机坐标结果转换到世界坐标，得到位置、姿态、宽高和旋转矩阵。
  */
 static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     const DetectionResult2D& det_2d,
     const std::vector<ProjectionMap>& proj_map,
     const pcl::PointCloud<pcl::PointXYZ>::Ptr& global_pc) 
 {
-    // 1. 过滤四边形内的点 (加入 Bounding Box 快速过滤)
+    // 先用 2D 四边形从投影表中筛出目标点云，为平面拟合提供尽量干净的局部点集。
     std::vector<Eigen::Vector3d> points_in_box;
     points_in_box.reserve(4096);
     std::vector<cv::Point2f> quad(det_2d.quad_pts.begin(), det_2d.quad_pts.end());
 
-    // 计算四边形的外接矩形
+    // 外接矩形用于快速排除明显不在目标区域内的点，降低多边形测试开销。
     cv::Rect bounding_rect = cv::boundingRect(quad);
 
     for (const auto& proj : proj_map) {
-        // 先进行快速的 AABB 盒过滤
         if (proj.u >= bounding_rect.x && proj.u <= bounding_rect.x + bounding_rect.width &&
             proj.v >= bounding_rect.y && proj.v <= bounding_rect.y + bounding_rect.height) {
             
-            // 只有在框内的点，才进行昂贵的多边形测试
             if (cv::pointPolygonTest(quad, cv::Point2f((float)proj.u, (float)proj.v), false) >= 0) {
                 const auto& pt = global_pc->points[proj.point_idx];
                 points_in_box.emplace_back(pt.x, pt.y, pt.z);
@@ -747,7 +757,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     }
     if (points_in_box.size() < 30) return std::nullopt;
 
-    // 2. 关键像素点：底边两点 + 第三点
+    // 选择底边两个端点和相邻第三点，它们后面会反投影成三条射线来恢复真实尺寸。
     const auto& q = det_2d.quad_pts;
     int ei = 0, ej = 1;
     float max_y = -1e30f;
@@ -766,7 +776,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     for (int k = 0; k < 4; ++k) if (!used[k]) { if (r0 < 0) r0 = k; else { r1 = k; break; } }
     cv::Point2f third_pt = (cv::norm(q[r0] - base_pt_a) <= cv::norm(q[r1] - base_pt_a)) ? q[r0] : q[r1];
 
-    // 3. 像素转射线 (Pixel to Ray)
+    // 像素点经内参逆矩阵转换成相机坐标系下的单位射线。
     auto get_ray_dir = [](const cv::Point2f &px) -> Eigen::Vector3d {
         cv::Vec3d vec(
             g_mat_k_inv.at<double>(0, 0) * px.x + g_mat_k_inv.at<double>(0, 1) * px.y + g_mat_k_inv.at<double>(0, 2),
@@ -779,7 +789,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     Eigen::Vector3d ray_2 = get_ray_dir(base_pt_b);
     Eigen::Vector3d ray_3 = get_ray_dir(third_pt);
 
-    // 4. RANSAC 平面拟合 (RANSAC Plane Fitting) - PCL Implementation
+    // 在目标点云上拟合主平面，过滤离群点后得到可靠的物体表面法向。
     pcl::PointCloud<pcl::PointXYZ>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     temp_cloud->points.reserve(points_in_box.size());
     for(const auto& pt : points_in_box) {
@@ -795,7 +805,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     seg.setOptimizeCoefficients(true);
     seg.setModelType(pcl::SACMODEL_PLANE);
     seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setDistanceThreshold(0.004); // 4mm
+    seg.setDistanceThreshold(0.004);
     seg.setMaxIterations(300);
     seg.setInputCloud(temp_cloud);
     seg.segment(*inliers, *coefficients);
@@ -808,9 +818,9 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     if (norm_l < 1e-9) return std::nullopt;
 
     n /= norm_l; d /= norm_l;
-    if (n.z() < 0) { n = -n; d = -d; } // 对齐法向量方向 (Align normal)
+    if (n.z() < 0) { n = -n; d = -d; }
 
-    // 5. 射线与平面求交 (Ray-Plane Intersection)
+    // 三条关键像素射线与拟合平面求交，得到物体边缘在相机坐标中的 3D 点。
     auto get_intersection = [&](const Eigen::Vector3d& dir, double& out_t) -> bool {
         double nd = n.dot(dir);
         if (std::abs(nd) < 1e-8) return false;
@@ -835,12 +845,11 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     edge_vec /= edge_len;
     if (edge_vec.cross(n).z() < 0) edge_vec = -edge_vec;
 
-    // 6. 坐标系转换：相机 -> 世界 (Coordinate Transformation: Camera -> World)
+    // 将相机坐标中的中心、方向和法向转换到世界坐标，作为最终输出坐标系。
     cv::Vec3f normal_cam = { (float)n.x(), (float)n.y(), (float)n.z() };
     cv::Vec3f dir_cam = { (float)edge_vec.x(), (float)edge_vec.y(), (float)edge_vec.z() };
     cv::Point3f center_cam = { (float)M.x(), (float)M.y(), (float)M.z() };
 
-    // 变换旋转部分 (Transform Rotation part)
     cv::Mat mat_r_wc = g_mat_twc(cv::Rect(0, 0, 3, 3));
     cv::Mat normal_world_mat = mat_r_wc * cv::Mat(normal_cam);
     cv::Mat dir_world_mat = mat_r_wc * cv::Mat(dir_cam);
@@ -849,8 +858,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     cv::Point3f dir_world(dir_world_mat.at<float>(0), dir_world_mat.at<float>(1), dir_world_mat.at<float>(2));
 
     auto transform_point_to_world_mm = [](const cv::Point3f &p) -> cv::Point3f {
-        // 输入点 p 是米 (m)，外参 g_mat_twc 是毫米 (mm)
-        // 必须先将 p 转为毫米才能与矩阵相乘
+        // 点云单位是米，外参平移单位是毫米，转换后再做齐次坐标变换。
         cv::Vec4f p_homo(p.x * 1000.0f, p.y * 1000.0f, p.z * 1000.0f, 1.0f);
         cv::Mat res = g_mat_twc * cv::Mat(p_homo);
         return cv::Point3f(res.at<float>(0), res.at<float>(1), res.at<float>(2));
@@ -861,7 +869,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     cv::Point3f p2_w_mm = transform_point_to_world_mm({(float)P2.x(), (float)P2.y(), (float)P2.z()});
     cv::Point3f p3_w_mm = transform_point_to_world_mm({(float)P3.x(), (float)P3.y(), (float)P3.z()});
 
-    // 7. 计算尺寸 (Calculate Dimensions in mm)
+    // 关键 3D 点之间的距离就是目标的物理宽高，单位保持为毫米。
     cv::Point3f vec_w = p2_w_mm - p1_w_mm;
     cv::Point3f vec_h = p3_w_mm - p1_w_mm;
     float w_val = std::sqrt(vec_w.dot(vec_w));
@@ -869,7 +877,7 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     
     if (!std::isfinite(w_val) || !std::isfinite(h_val)) return std::nullopt;
 
-    // 8. 构建旋转矩阵 (Construct Rotation Matrix)
+    // 由世界坐标下的法向和边方向构建正交坐标轴，得到姿态角和旋转矩阵。
     auto normalize = [](cv::Point3f v) -> cv::Point3f {
         float l = std::sqrt(v.dot(v));
         return (l < 1e-9f) ? cv::Point3f(0,0,0) : v * (1.0f/l);
@@ -915,7 +923,8 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
 
 
 /**
- * @brief 在图像上绘制结果
+ * 在原图上绘制检测和位姿结果。
+ * 轮廓、底边中心和文本信息用于人工核查算法输出是否与实际目标位置一致。
  */
 static void visualize_results(cv::Mat& vis_image, const std::vector<LocalBoxPoseResult>& results) {
     for (const auto& r : results) {
@@ -985,7 +994,8 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
     const std::string timestamp = make_timestamp_dir_name();
     fs::path output_dir = fs::path(g_root_output_dir) / timestamp;
 
-    // 1. 数据加载 (Data Loading)
+    // 创建本次运行的结果目录，并采集一帧 RGB 与一帧点云作为同一批输入数据。
+    // 原始数据会异步保存，便于后续复盘，但不阻塞在线检测流程。
     std::error_code ec;
     fs::create_directories(output_dir, ec);
 
@@ -994,50 +1004,44 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         return -22;
     }
 
-    // 异步保存原始 RGB
     const fs::path rgbPath = output_dir / "rgb_orig.jpg";
-    // 深拷贝图像，防止主线程后续处理修改了 image_rgb 导致保存出错
     cv::Mat image_rgb_clone = image_rgb.clone();
     std::thread([rgbPath, image_rgb_clone]() {
         if (!cv::imwrite(rgbPath.string(), image_rgb_clone)) {
             spdlog::warn("Failed to save original RGB");
         }
-    }).detach(); // detach() 实现“阅后即焚”，不阻塞主线程
+    }).detach();
 
     if (g_camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
         spdlog::error("Failed to capture point cloud or empty");
         return -23;
     }
 
-    // 异步保存原始点云
     const fs::path pcdPath = output_dir / "cloud_orig.pcd";
-    // 深拷贝点云，防止主线程后续处理修改了 point_cloud
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_clone(new pcl::PointCloud<pcl::PointXYZ>(*point_cloud));
     std::thread([pcdPath, cloud_clone]() {
         pcl::io::savePCDFileASCII(pcdPath.string(), *cloud_clone);
-        // 额外建议：如果不需要人类可读，强烈建议改成二进制保存，速度快得多，文件也小：
-        // pcl::io::savePCDFileBinary(pcdPath.string(), *cloud_clone);
     }).detach();
 
-    // 2. 推理检测 (Inference)
+    // RF-DETR 负责从 RGB 图中得到实例 mask，后续 3D 步骤都以这些 mask 为目标区域。
     auto t1 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 1: Data Loading took {:.3f} ms", std::chrono::duration<double, std::milli>(t1 - time_start).count());
 
     auto detected_masks = run_inference_and_get_masks(image_rgb);
     
-    // 3. 预计算投影 (Precompute Projection)
+    // 预先把点云投影到 RGB 像素，后续每个 mask 都可以复用这张映射表。
     auto t2 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 2: Inference took {:.3f} ms", std::chrono::duration<double, std::milli>(t2 - t1).count());
 
     auto proj_map = project_point_cloud_to_image(point_cloud, image_rgb.size());
 
-    // 4. 主处理循环 (Main Processing Loop)
+    // 将每个 2D mask 转成四边形，再结合点云估计目标在世界坐标中的位姿与尺寸。
     auto t3 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 3: Precompute Projection took {:.3f} ms", std::chrono::duration<double, std::milli>(t3 - t2).count());
     std::vector<LocalBoxPoseResult> results;
     cv::Mat vis_image = image_rgb.clone(); 
     
-    // 如果需要，在可视化图像上绘制掩码
+    // 可视化叠加 mask，便于直接检查分割区域是否覆盖了目标。
     if (g_paint_masks_on_vis) {
         const cv::Scalar kVisColor(0, 255, 0);
         for (const auto& mask : detected_masks) {
@@ -1069,13 +1073,13 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         }
     }
 
-    // 5. 可视化结果 (Visualize Results)
+    // 绘制最终轮廓、姿态和尺寸，并保存到本次运行目录。
     auto t4 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 4: Main Processing Loop took {:.3f} ms", std::chrono::duration<double, std::milli>(t4 - t3).count());
 
     visualize_results(vis_image, results);
 
-    // 6. 结果输出 (Output)
+    // 将内部结果转换成 DLL 对外结构体，调用方最终拿到世界坐标、尺寸和旋转矩阵。
     auto t5 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 5: Visualize Results took {:.3f} ms", std::chrono::duration<double, std::milli>(t5 - t4).count());
 
@@ -1093,7 +1097,6 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         auto &dst = box_array[i];
         
         dst.id = src.id;
-        // 直接赋值，单位已是毫米 (Direct assignment, unit is already mm)
         dst.x = src.xyz_mm.x; 
         dst.y = src.xyz_mm.y; 
         dst.z = src.xyz_mm.z;

@@ -1,7 +1,3 @@
-//
-// Created by zwj on 2025/1/13.
-//
-
 #ifndef LANXINCAMERA_H
 #define LANXINCAMERA_H
 #include <opencv2/opencv.hpp>
@@ -13,6 +9,7 @@
 
 class LanxinCamera final {
 public:
+    // 构造时立即按 IP 建立连接，使调用方只需关注取 RGB 或点云数据。
     explicit LanxinCamera(std::string cameraIp) : camera_ip_(std::move(cameraIp)) {
         connect();
     }
@@ -41,6 +38,7 @@ public:
     }
 
 private:
+    // 保存 SDK 句柄和图像参数，后续每次取帧都复用这些连接状态。
     int connect();
 
     LxDeviceInfo *p_device_list = nullptr;
@@ -59,4 +57,4 @@ private:
 };
 
 
-#endif //LANXINCAMERA_H
+#endif // 头文件保护

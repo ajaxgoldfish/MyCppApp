@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.29)
 project(MyCppApp)
 
-# 使用最新 C++ 标准
+# 统一使用 C++23，保证主库和测试程序在同一语言标准下编译。
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -11,7 +11,7 @@ find_package(OpenCV CONFIG REQUIRED)
 find_package(PCL CONFIG REQUIRED)
 find_package(OpenMP REQUIRED)
 
-# Common settings
+# 这里集中维护头文件目录，主 DLL 和测试程序共享同一套依赖路径。
 set(COMMON_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/third_party/lanxin/include
@@ -19,6 +19,7 @@ set(COMMON_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/include
 )
 
+# 这里集中维护第三方库，保证检测库和测试程序链接到完全一致的运行依赖。
 set(COMMON_LIBS
     ${OpenCV_LIBS}
     spdlog::spdlog
@@ -35,8 +36,7 @@ set(COMMON_LIBS
     ${PROJECT_SOURCE_DIR}/third_party/onnxruntime-win-x64-gpu-1.25.1/lib/onnxruntime.lib
 )
 
-# 1. Shared Library (Unified DLL)
-# Previously yzx_vision_zzb_gpu, now just yzx_vision_zzb or keep name for compat
+# 生成对外使用的视觉检测 DLL，内部完成相机取数、ONNX 推理和 3D 位姿解算。
 add_library(yzx_vision_zzb_gpu SHARED
     src/cpu_library.cpp
     src/LanxinCamera.cpp
@@ -45,11 +45,10 @@ add_library(yzx_vision_zzb_gpu SHARED
 target_include_directories(yzx_vision_zzb_gpu PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(yzx_vision_zzb_gpu PRIVATE ${COMMON_LIBS})
 
-# 2. Test Executable (Links against DLL)
+# 测试程序直接调用 DLL 接口，用于验证相机、标定和检测流程是否能完整跑通。
 add_executable(test_gpu_dll src/test_gpu_dll.cpp)
 
 target_include_directories(test_gpu_dll PRIVATE ${COMMON_INCLUDE_DIRS})
-# Link against the shared library
 target_link_libraries(test_gpu_dll PRIVATE yzx_vision_zzb_gpu ${COMMON_LIBS})
 
 set_target_properties(test_gpu_dll PROPERTIES

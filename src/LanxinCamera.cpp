@@ -13,7 +13,8 @@ static void checkTC(LX_STATE val) {
 }
 
 int LanxinCamera::connect() {
-    // 查找相机
+    // 连接指定 IP 的蓝芯相机，并准备 RGB 与深度数据流。
+    // 成功后缓存图像尺寸、数据类型和相机内参，为后续取图和点云转换提供基础参数。
     int device_num = 0;
     checkTC(DcGetDeviceList(&p_device_list, &device_num));
     if (device_num <= 0) {
@@ -49,21 +50,20 @@ int LanxinCamera::connect() {
                      device_info.id, handle, device_info.ip, device_info.firmware_ver, device_info.sn,
                      device_info.name, device_info.algor_ver);
 
-        // 设置数据流
+        // 只开启本算法需要的深度流和 RGB 流，减少无关数据传输。
         bool test_depth = true, test_amp = true, test_rgb = true;
         checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_3D_DEPTH_STREAM, test_depth));
-        //checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_3D_AMP_STREAM, test_amp));
         checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, test_rgb));
 
+        // 幅值流当前不参与检测，保留状态变量便于后续需要时恢复调试。
         checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_3D_DEPTH_STREAM, &test_depth));
-        //checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_3D_AMP_STREAM, &test_amp));
         checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, &test_rgb));
         spdlog::info("test_depth:{} test_amp:{} test_rgb:{}", test_depth, test_amp, test_rgb);
 
-        // RGBD 对齐
+        // 打开 RGB 到深度坐标的对齐，使 2D mask 能和点云建立空间对应关系。
         checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_TO_DEPTH, true));
 
-        // 获取图像参数
+        // 读取图像参数后，CapFrame 可以按正确尺寸和格式构造 OpenCV/PCL 数据。
         LxIntValueInfo int_value;
         checkTC(DcGetIntValue(handle, LX_INT_3D_IMAGE_WIDTH, &int_value));
         this->tof_width = int_value.cur_value;
@@ -82,7 +82,7 @@ int LanxinCamera::connect() {
         checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_DATA_TYPE, &int_value));
         this->rgb_data_type = int_value.cur_value;
 
-        // 开启数据流
+        // 数据流启动后即可连续获取 RGB 图像和 XYZ 点云。
         checkTC(DcStartStream(handle));
         stream_started = true;
         spdlog::info("DcStartStream 完成");
@@ -124,7 +124,7 @@ int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
         return -1;
     }
 
-    // depth
+    // 读取 SDK 输出的 XYZ 深度数据，并转换成以米为单位的 PCL 点云。
     float *xyz_data = nullptr;
     if (LX_SUCCESS != DcGetPtrValue(handle, LX_PTR_XYZ_DATA, reinterpret_cast<void **>(&xyz_data))) {
         spdlog::error("获取点云数据失败");
@@ -164,7 +164,7 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
         return -1;
     }
 
-    // rgb
+    // 读取 SDK 当前 RGB 缓冲区，并封装为 OpenCV Mat 供检测模型使用。
     unsigned char *data_ptr = nullptr;
     if (LX_SUCCESS != DcGetPtrValue(handle, LX_PTR_2D_IMAGE_DATA, reinterpret_cast<void **>(&data_ptr))) {
         spdlog::error("获取 RGB 数据失败");
