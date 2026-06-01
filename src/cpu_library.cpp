@@ -141,22 +141,33 @@ namespace {
 
         cv::Mat intrinsic;
         cv::Mat transform_world_cam;
-        fs_config["intrinsicRGB"] >> intrinsic;
-        fs_config["extrinsicRGB"] >> transform_world_cam;
+        std::string intrinsic_node = "intrinsics";
+        std::string extrinsic_node = "extrinsics";
+        fs_config[intrinsic_node] >> intrinsic;
+        fs_config[extrinsic_node] >> transform_world_cam;
+
+        if (intrinsic.empty()) {
+            intrinsic_node = "intrinsicRGB";
+            fs_config[intrinsic_node] >> intrinsic;
+        }
+        if (transform_world_cam.empty()) {
+            extrinsic_node = "extrinsicRGB";
+            fs_config[extrinsic_node] >> transform_world_cam;
+        }
         fs_config.release();
 
         if (intrinsic.empty() || intrinsic.rows != 3 || intrinsic.cols != 3) {
-            spdlog::error("[calibration] intrinsicRGB must be 3x3 matrix: {}", calibration_path);
+            spdlog::error("[calibration] intrinsics/intrinsicRGB must be 3x3 matrix: {}", calibration_path);
             return -26;
         }
         if (intrinsic.type() != CV_64F) intrinsic.convertTo(intrinsic, CV_64F);
 
         if (transform_world_cam.empty()) {
-            spdlog::error("[calibration] extrinsicRGB node not found or empty: {}", calibration_path);
+            spdlog::error("[calibration] extrinsics/extrinsicRGB node not found or empty: {}", calibration_path);
             return -28;
         }
         if (transform_world_cam.rows != 4 || transform_world_cam.cols != 4) {
-            spdlog::error("[calibration] extrinsicRGB must be 4x4 matrix: {}", calibration_path);
+            spdlog::error("[calibration] extrinsics/extrinsicRGB must be 4x4 matrix: {}", calibration_path);
             return -29;
         }
         if (transform_world_cam.type() != CV_64F) {
@@ -169,7 +180,7 @@ namespace {
         g_mat_twc = transform_world_cam.clone();
         if (g_mat_twc.type() != CV_32F) g_mat_twc.convertTo(g_mat_twc, CV_32F);
 
-        spdlog::info("[calibration] Loaded intrinsic/extrinsic from {}", calibration_path);
+        spdlog::info("[calibration] Loaded {} and {} from {}", intrinsic_node, extrinsic_node, calibration_path);
         return 0;
     }
 

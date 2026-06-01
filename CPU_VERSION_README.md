@@ -3,7 +3,7 @@
 ## API
 
 1. `bs_yzx_init(bool isDebug)` initializes the camera + GPU pipeline and CNN settings from `cnn.ini`.
-2. `bs_yzx_object_detection_lanxin(zzb::Box boxArr[], const char *cameraIp, const char *intrinsicExtrinsicPath)` reads `intrinsicRGB` and `extrinsicRGB` from `intrinsicExtrinsicPath`, captures from the Lanxin camera at `cameraIp`, runs GPU detection, and writes results.
+2. `bs_yzx_object_detection_lanxin(zzb::Box boxArr[], const char *cameraIp, const char *intrinsicExtrinsicPath)` reads `intrinsics` and `extrinsics` from `intrinsicExtrinsicPath`, captures from the Lanxin camera at `cameraIp`, runs GPU detection, and writes results.
 
 `taskId` is no longer part of the public API. Each run creates a timestamp directory:
 
@@ -14,7 +14,7 @@ res/<timestamp>/
   vis_on_orig.jpg
 ```
 
-The local file mode and CPU mode have been removed. `cameraIp` and `intrinsicExtrinsicPath` are required. The program opens the Lanxin camera by that IP address, reads calibration from the supplied path, captures data, and writes raw data plus results to `res/<timestamp>/`. The example executables accept the camera IP as the first command-line argument and the calibration path as the second.
+The local file mode and CPU mode have been removed. `cameraIp` and `intrinsicExtrinsicPath` are required. The program opens the Lanxin camera by that IP address, reads calibration from the supplied path, captures data, and writes raw data plus results to `res/<timestamp>/`. The example executables accept the camera IP as the first command-line argument and the calibration path as the second. Legacy node names `intrinsicRGB` and `extrinsicRGB` are still accepted.
 
 ## Return Values
 
