@@ -131,38 +131,55 @@ int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
             return -5;
         }
     }
-    const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
-    if ((LX_SUCCESS != ret) && (LX_E_FRAME_ID_NOT_MATCH != ret) && (LX_E_FRAME_MULTI_MACHINE != ret)) {
-        if (LX_E_RECONNECTING == ret) {
-            spdlog::warn("设备正在重连中");
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        return -1;
-    }
 
-    // 读取 SDK 输出的 XYZ 深度数据，并转换成以米为单位的 PCL 点云。
-    float *xyz_data = nullptr;
-    if (LX_SUCCESS != DcGetPtrValue(handle, LX_PTR_XYZ_DATA, reinterpret_cast<void **>(&xyz_data))) {
-        spdlog::error("获取点云数据失败");
-        return -2;
-    }
-
-    pc.clear();
-    const int total = tof_width * tof_height;
-    pc.points.reserve(total);
-    for (int i = 0; i < total; ++i) {
-        float x = xyz_data[i * 3];
-        float y = xyz_data[i * 3 + 1];
-        float z = xyz_data[i * 3 + 2];
-        if (x == 0 && y == 0 && z == 0) {
-            continue;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    int last_error = -1;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
+        if (LX_SUCCESS != ret) {
+            spdlog::warn("LX_CMD_GET_NEW_FRAME returned {}, error={}",
+                         static_cast<int>(ret), DcGetErrorString(ret));
         }
-        pc.points.emplace_back(x / 1000, y / 1000, z / 1000);
+        if ((LX_SUCCESS != ret) && (LX_E_FRAME_ID_NOT_MATCH != ret) && (LX_E_FRAME_MULTI_MACHINE != ret)) {
+            if (LX_E_RECONNECTING == ret) {
+                spdlog::warn("设备正在重连中");
+            }
+            last_error = -1;
+        } else {
+            // 读取 SDK 输出的 XYZ 深度数据，并转换成以米为单位的 PCL 点云。
+            float *xyz_data = nullptr;
+            const auto get_ptr_ret =
+                DcGetPtrValue(handle, LX_PTR_XYZ_DATA, reinterpret_cast<void **>(&xyz_data));
+            if (LX_SUCCESS == get_ptr_ret && xyz_data != nullptr) {
+                pc.clear();
+                const int total = tof_width * tof_height;
+                pc.points.reserve(total);
+                for (int i = 0; i < total; ++i) {
+                    float x = xyz_data[i * 3];
+                    float y = xyz_data[i * 3 + 1];
+                    float z = xyz_data[i * 3 + 2];
+                    if (x == 0 && y == 0 && z == 0) {
+                        continue;
+                    }
+                    pc.points.emplace_back(x / 1000, y / 1000, z / 1000);
+                }
+                pc.width = pc.points.size();
+                pc.height = 1;
+                pc.is_dense = false;
+                if (!pc.empty()) {
+                    return 0;
+                }
+            } else {
+                spdlog::warn("DcGetPtrValue(LX_PTR_XYZ_DATA) returned {}, error={}",
+                             static_cast<int>(get_ptr_ret), DcGetErrorString(get_ptr_ret));
+            }
+            last_error = -2;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    pc.width = pc.points.size();
-    pc.height = 1;
-    pc.is_dense = false;
-    return 0;
+    spdlog::error("获取点云数据失败，3秒内重试仍未成功");
+    return last_error;
 }
 
 int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
@@ -171,21 +188,39 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
             return -5;
         }
     }
-    const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
-    if ((LX_SUCCESS != ret) && (LX_E_FRAME_ID_NOT_MATCH != ret) && (LX_E_FRAME_MULTI_MACHINE != ret)) {
-        if (LX_E_RECONNECTING == ret) {
-            spdlog::warn("设备正在重连中");
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        return -1;
-    }
 
-    // 读取 SDK 当前 RGB 缓冲区，并封装为 OpenCV Mat 供检测模型使用。
-    unsigned char *data_ptr = nullptr;
-    if (LX_SUCCESS != DcGetPtrValue(handle, LX_PTR_2D_IMAGE_DATA, reinterpret_cast<void **>(&data_ptr))) {
-        spdlog::error("获取 RGB 数据失败");
-        return -3;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    int last_error = -1;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
+        if (LX_SUCCESS != ret) {
+            spdlog::warn("LX_CMD_GET_NEW_FRAME returned {}, error={}",
+                         static_cast<int>(ret), DcGetErrorString(ret));
+        }
+        if ((LX_SUCCESS != ret) && (LX_E_FRAME_ID_NOT_MATCH != ret) && (LX_E_FRAME_MULTI_MACHINE != ret)) {
+            if (LX_E_RECONNECTING == ret) {
+                spdlog::warn("设备正在重连中");
+            }
+            last_error = -1;
+        } else {
+            // 读取 SDK 当前 RGB 缓冲区，并封装为 OpenCV Mat 供检测模型使用。
+            unsigned char *data_ptr = nullptr;
+            const auto get_ptr_ret =
+                DcGetPtrValue(handle, LX_PTR_2D_IMAGE_DATA, reinterpret_cast<void **>(&data_ptr));
+            if (LX_SUCCESS == get_ptr_ret && data_ptr != nullptr) {
+                rgbMat = cv::Mat(rgb_height, rgb_width, CV_MAKETYPE(rgb_data_type, rgb_channles), data_ptr);
+                if (!rgbMat.empty()) {
+                    return 0;
+                }
+            } else {
+                spdlog::warn("DcGetPtrValue(LX_PTR_2D_IMAGE_DATA) returned {}, error={}",
+                             static_cast<int>(get_ptr_ret), DcGetErrorString(get_ptr_ret));
+            }
+            last_error = -3;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    rgbMat = cv::Mat(rgb_height, rgb_width, CV_MAKETYPE(rgb_data_type, rgb_channles), data_ptr);
-    return 0;
+    spdlog::error("获取 RGB 数据失败，3秒内重试仍未成功");
+    return last_error;
 }
