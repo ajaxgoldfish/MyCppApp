@@ -40,8 +40,14 @@ namespace fs = std::filesystem;
 #endif
 
 namespace {
-    // 全局配置保存模型路径、阈值和 RF-DETR 后处理策略。
+    enum class ModelType {
+        RfDetr,
+        MaskRcnn
+    };
+
+    // 全局配置保存模型类型、模型路径、阈值和 RF-DETR 后处理策略。
     // 初始化时从 cnn.ini 覆盖默认值，后续推理、mask 生成和可视化都依赖这些参数保持一致。
+    ModelType g_model_type = ModelType::RfDetr;
     std::string g_model_path;
     std::string g_cnn_config_path;
     float g_score_threshold = 0.65f;
@@ -246,7 +252,11 @@ namespace {
         return default_value;
     }
 
-    // 加载 CNN/RF-DETR 配置，统一管理模型路径、输入尺寸、分类阈值和 mask 后处理方式。
+    const char* model_type_name() {
+        return g_model_type == ModelType::MaskRcnn ? "mask_rcnn" : "rf";
+    }
+
+    // 加载 CNN 配置，统一管理模型类型、模型路径、输入尺寸、分类阈值和 mask 后处理方式。
     // 这些配置决定推理候选框如何过滤，以及低分辨率 mask logits 如何还原到原图。
     void load_cnn_config() {
         std::ifstream file(g_cnn_config_path);
@@ -274,7 +284,20 @@ namespace {
             const auto key_lower = lower_copy(key);
 
             try {
-                if (key_lower == "model_path") {
+                if (key_lower == "model_type") {
+                    const auto model_type = lower_copy(value);
+                    if (model_type == "rf" || model_type == "rfdetr" || model_type == "rf_detr" ||
+                        model_type == "rf-detr" || model_type == "rf detr") {
+                        g_model_type = ModelType::RfDetr;
+                    } else if (model_type == "mask_rcnn" || model_type == "mask-rcnn" ||
+                               model_type == "maskrcnn" || model_type == "mask rcnn" ||
+                               model_type == "rcnn") {
+                        g_model_type = ModelType::MaskRcnn;
+                    } else {
+                        spdlog::warn("[init] Unsupported model_type '{}', use {}",
+                                     value, model_type_name());
+                    }
+                } else if (key_lower == "model_path") {
                     if (!value.empty()) g_model_path = value;
                 } else if (key_lower == "score_threshold") {
                     const float parsed_value = std::stof(value);
@@ -324,8 +347,8 @@ namespace {
             }
         }
 
-        spdlog::info("[init] RF-DETR model={}, input={}x{}, score_threshold={}, mask_threshold={}, activation={}, mask_output={}, exclude_last_class={}, clip_masks_to_boxes={}",
-                     g_model_path, g_rfdetr_input_width, g_rfdetr_input_height,
+        spdlog::info("[init] model_type={}, model={}, RF-DETR input={}x{}, score_threshold={}, mask_threshold={}, activation={}, mask_output={}, exclude_last_class={}, clip_masks_to_boxes={}",
+                     model_type_name(), g_model_path, g_rfdetr_input_width, g_rfdetr_input_height,
                      g_score_threshold, g_mask_threshold, g_rfdetr_score_activation, g_rfdetr_mask_output,
                      g_rfdetr_exclude_last_class, g_rfdetr_clip_masks_to_boxes);
     }
@@ -533,7 +556,7 @@ int bs_yzx_box_sizeof() {
      * RF-DETR 导出的 mask 通常是低分辨率 logits，这里先双线性放大 logits，再按阈值二值化，
      * 使 ONNXRuntime 的 mask 边界尽量接近 PyTorch model.predict() 的后处理效果。
      */
-    static std::vector<cv::Mat1b> run_inference_and_get_masks(const cv::Mat& image_rgb) {
+    static std::vector<cv::Mat1b> run_rfdetr_inference_and_get_masks(const cv::Mat& image_rgb) {
         std::vector<cv::Mat1b> detected_masks;
         if (image_rgb.empty()) return detected_masks;
 
@@ -662,6 +685,131 @@ int bs_yzx_box_sizeof() {
 
         spdlog::debug("RF-DETR Seg kept {} masks from {} queries", detected_masks.size(), query_count);
         return detected_masks;
+    }
+
+    /**
+     * 执行 Mask RCNN ONNX 推理，并按检测框 ROI 把实例 mask 还原到原图尺寸。
+     * Mask RCNN 输出的 dets 为 x1,y1,x2,y2,score，每个低分辨率 mask 只对应各自检测框。
+     */
+    static std::vector<cv::Mat1b> run_mask_rcnn_inference_and_get_masks(const cv::Mat& image_rgb) {
+        std::vector<cv::Mat1b> detected_masks;
+        if (image_rgb.empty()) return detected_masks;
+
+        cv::Mat rgb_float;
+        cv::cvtColor(image_rgb, rgb_float, cv::COLOR_BGR2RGB);
+        rgb_float.convertTo(rgb_float, CV_32F);
+
+        static const cv::Scalar kMean(123.675, 116.28, 103.53);
+        static const cv::Scalar kStdv(58.395, 57.12, 57.375);
+        cv::subtract(rgb_float, kMean, rgb_float);
+        cv::divide(rgb_float, kStdv, rgb_float);
+
+        cv::Mat blob;
+        cv::dnn::blobFromImage(rgb_float, blob, 1.0, cv::Size(), {}, false, false, CV_32F);
+
+        std::vector<int64_t> input_shape = {1, 3, blob.size[2], blob.size[3]};
+        Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+            mem_info, reinterpret_cast<float *>(blob.data), static_cast<size_t>(blob.total()),
+            input_shape.data(), input_shape.size());
+
+        const char *input_names[] = {g_input_name.c_str()};
+        spdlog::info("Mask RCNN running ONNX inference, input={}x{}", image_rgb.cols, image_rgb.rows);
+        auto ort_outputs = g_session->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1,
+                              g_output_names_ptr.data(), g_output_names_ptr.size());
+        spdlog::info("Mask RCNN ONNX inference finished, output_count={}", ort_outputs.size());
+
+        if (ort_outputs.size() < 3) {
+            spdlog::error("Mask RCNN expects 3 outputs: dets, labels, masks. Actual output count={}",
+                          ort_outputs.size());
+            return detected_masks;
+        }
+
+        const size_t dets_idx = find_output_index({"dets", "detections"}, 0);
+        const size_t masks_idx = find_output_index({"masks"}, 2);
+
+        auto info_dets = ort_outputs[dets_idx].GetTensorTypeAndShapeInfo();
+        auto info_masks = ort_outputs[masks_idx].GetTensorTypeAndShapeInfo();
+        auto shape_dets = info_dets.GetShape();
+        auto shape_masks = info_masks.GetShape();
+        spdlog::info("Mask RCNN outputs: dets {}={}, masks {}={}",
+                     g_output_names_str[dets_idx], shape_to_string(shape_dets),
+                     g_output_names_str[masks_idx], shape_to_string(shape_masks));
+
+        if (info_dets.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            info_masks.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            spdlog::error("Mask RCNN dets and masks outputs must be float tensors.");
+            return detected_masks;
+        }
+
+        if (shape_dets.size() < 2 || shape_masks.size() < 3 || shape_dets.back() != 5) {
+            spdlog::error("Unexpected Mask RCNN output shapes: dets={}, masks={}",
+                          shape_to_string(shape_dets), shape_to_string(shape_masks));
+            return detected_masks;
+        }
+
+        const int64_t det_count = query_count_from_shape(shape_dets, 1);
+        const int64_t mask_count = query_count_from_shape(shape_masks, 2);
+        const int64_t detection_count = std::min(det_count, mask_count);
+        const int mask_h = static_cast<int>(shape_masks[shape_masks.size() - 2]);
+        const int mask_w = static_cast<int>(shape_masks[shape_masks.size() - 1]);
+
+        if (detection_count <= 0 || mask_h <= 0 || mask_w <= 0) {
+            spdlog::warn("Mask RCNN produced empty outputs: detections={}, mask={}x{}",
+                         detection_count, mask_w, mask_h);
+            return detected_masks;
+        }
+
+        const int64_t mask_area = static_cast<int64_t>(mask_h) * mask_w;
+        const int64_t required_det_elements = detection_count * 5;
+        const int64_t required_mask_elements = detection_count * mask_area;
+        if (info_dets.GetElementCount() < required_det_elements ||
+            info_masks.GetElementCount() < required_mask_elements) {
+            spdlog::error("Mask RCNN output buffers are smaller than expected: dets {}/{}, masks {}/{}",
+                          info_dets.GetElementCount(), required_det_elements,
+                          info_masks.GetElementCount(), required_mask_elements);
+            return detected_masks;
+        }
+
+        const float *det_data = ort_outputs[dets_idx].GetTensorData<float>();
+        const float *mask_data = ort_outputs[masks_idx].GetTensorData<float>();
+
+        detected_masks.reserve(static_cast<size_t>(detection_count));
+        for (int64_t i = 0; i < detection_count; ++i) {
+            const float *curr_det = det_data + i * 5;
+            if (curr_det[4] < g_score_threshold) continue;
+
+            const int x1 = std::clamp(static_cast<int>(std::lround(curr_det[0])), 0, image_rgb.cols - 1);
+            const int y1 = std::clamp(static_cast<int>(std::lround(curr_det[1])), 0, image_rgb.rows - 1);
+            const int x2 = std::clamp(static_cast<int>(std::lround(curr_det[2])), 0, image_rgb.cols - 1);
+            const int y2 = std::clamp(static_cast<int>(std::lround(curr_det[3])), 0, image_rgb.rows - 1);
+
+            cv::Rect roi_rect(x1, y1, std::max(1, x2 - x1), std::max(1, y2 - y1));
+            roi_rect &= cv::Rect(0, 0, image_rgb.cols, image_rgb.rows);
+            if (roi_rect.area() <= 0) continue;
+
+            const float *curr_mask_ptr = mask_data + i * mask_area;
+            cv::Mat mask_float(mask_h, mask_w, CV_32F, const_cast<float *>(curr_mask_ptr));
+            cv::Mat mask_resized;
+            cv::resize(mask_float, mask_resized, roi_rect.size(), 0, 0, cv::INTER_LINEAR);
+
+            cv::Mat1b mask_bin;
+            cv::compare(mask_resized, g_mask_threshold, mask_bin, cv::CMP_GT);
+
+            cv::Mat1b full_mask(image_rgb.rows, image_rgb.cols, static_cast<uchar>(0));
+            full_mask(roi_rect).setTo(255, mask_bin);
+            detected_masks.emplace_back(std::move(full_mask));
+        }
+
+        spdlog::debug("Mask RCNN kept {} masks from {} detections", detected_masks.size(), detection_count);
+        return detected_masks;
+    }
+
+    static std::vector<cv::Mat1b> run_inference_and_get_masks(const cv::Mat& image_rgb) {
+        if (g_model_type == ModelType::MaskRcnn) {
+            return run_mask_rcnn_inference_and_get_masks(image_rgb);
+        }
+        return run_rfdetr_inference_and_get_masks(image_rgb);
     }
 
 /**
