@@ -29,6 +29,7 @@
 #include <vector>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include "LanxinCamera.h"
 
 using namespace std;
@@ -56,8 +57,8 @@ namespace {
     // 标定矩阵把 RGB 像素、相机点云和世界坐标连接起来，是后续 3D 位姿解算的基础。
     cv::Mat g_intrinsic;
 
-    // 相机对象按传入 IP 延迟创建，便于同一进程中复用连接或切换设备。
-    std::unique_ptr<LanxinCamera> g_camera;
+    // 初始化时一次性打开全部相机；识别时只按 IP 查表，不再关闭或重新打开设备。
+    std::unordered_map<std::string, std::unique_ptr<LanxinCamera>> g_cameras;
 
     // 单个目标的完整中间结果，既用于写回 DLL 输出，也用于在原图上绘制调试信息。
     struct LocalBoxPoseResult {
@@ -184,40 +185,57 @@ namespace {
         return 0;
     }
 
-    // 根据本次调用传入的 IP 获取相机连接。
-    // 如果已连接同一台设备则直接复用，减少重复初始化开销；如果 IP 改变则重新连接。
-    int ensure_camera_for_ip(const std::string& camera_ip) {
+    // 启动时一次性打开 SDK 枚举到的全部相机，并保持数据流直到 DLL/进程退出。
+    int initialize_all_cameras() {
+        if (!g_cameras.empty()) return 0;
+
+        std::vector<std::string> camera_ips;
+        try {
+            camera_ips = LanxinCamera::DiscoverCameraIps();
+        } catch (const std::exception& e) {
+            spdlog::critical("Failed to discover LanxinCamera devices: {}", e.what());
+            return -11;
+        }
+
+        if (camera_ips.empty()) {
+            spdlog::critical("No LanxinCamera device found");
+            return -11;
+        }
+
+        for (const auto& camera_ip : camera_ips) {
+            try {
+                auto camera = std::make_unique<LanxinCamera>(camera_ip);
+                if (!camera->isOpened()) {
+                    spdlog::critical("LanxinCamera initialization failed, ip={}", camera_ip);
+                    g_cameras.clear();
+                    return -11;
+                }
+                g_cameras.emplace(camera_ip, std::move(camera));
+            } catch (const std::exception& e) {
+                spdlog::critical("LanxinCamera initialization failed, ip={}, error={}", camera_ip, e.what());
+                g_cameras.clear();
+                return -11;
+            }
+        }
+
+        spdlog::info("All LanxinCamera devices are ready, count={}", g_cameras.size());
+        return 0;
+    }
+
+    // 识别时只做一次 IP 查表，返回启动阶段已经打开并启动数据流的相机。
+    LanxinCamera* find_ready_camera(const std::string& camera_ip) {
         if (camera_ip.empty()) {
             spdlog::error("Camera IP is required");
-            return -13;
+            return nullptr;
         }
 
-        if (g_camera && g_camera->isOpened() && g_camera->getCameraIp() == camera_ip) {
-            return 0;
+        const auto camera_it = g_cameras.find(camera_ip);
+        if (camera_it == g_cameras.end() || !camera_it->second || !camera_it->second->isOpened()) {
+            spdlog::error("Camera IP is not ready: {}", camera_ip);
+            return nullptr;
         }
 
-        if (g_camera) {
-            spdlog::info("Switching LanxinCamera from ip={} to ip={}",
-                         g_camera->getCameraIp(), camera_ip);
-            g_camera.reset();
-        }
-
-        try {
-            g_camera = std::make_unique<LanxinCamera>(camera_ip);
-        } catch (const std::exception& e) {
-            spdlog::critical("LanxinCamera connection failed, ip={}, error={}", camera_ip, e.what());
-            g_camera.reset();
-            return -11;
-        }
-
-        if (!g_camera->isOpened()) {
-            spdlog::critical("LanxinCamera connection failed, ip={}", camera_ip);
-            g_camera.reset();
-            return -11;
-        }
-
-        spdlog::info("LanxinCamera connected, ip={}", camera_ip);
-        return 0;
+        return camera_it->second.get();
     }
 
     // 配置文件里布尔值允许多种写法，统一解析后供初始化逻辑使用。
@@ -317,8 +335,8 @@ namespace {
 
 /**
  * 初始化算法流水线。
- * 负责加载配置、创建 ONNX Runtime GPU 会话并缓存模型输入输出信息；
- * 相机和标定文件在检测接口中按实际参数加载，方便运行时切换设备或标定。
+ * 负责加载配置、创建 ONNX Runtime GPU 会话，并一次性打开全部相机；
+ * 检测时只按 IP 选择已就绪相机，避免切换时重复关闭和打开设备。
  */
 int bs_yzx_init(const bool is_debug) {
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
@@ -384,7 +402,9 @@ int bs_yzx_init(const bool is_debug) {
         }
     }
 
-    // 相机连接依赖调用方传入的 IP，因此放到检测阶段创建或切换。
+    if (const int camera_result = initialize_all_cameras(); camera_result != 0) {
+        return camera_result;
+    }
 
     return 0;
 }
@@ -994,9 +1014,9 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         return calibration_result;
     }
 
-    if (const int camera_result = ensure_camera_for_ip(requested_camera_ip); camera_result != 0) {
-        return camera_result;
-    }
+    if (requested_camera_ip.empty()) return -13;
+    LanxinCamera *camera = find_ready_camera(requested_camera_ip);
+    if (camera == nullptr) return -11;
 
     auto time_start = std::chrono::steady_clock::now();
 
@@ -1010,7 +1030,7 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
     std::error_code ec;
     fs::create_directories(output_dir, ec);
 
-    if (g_camera->CapFrame(image_rgb) != 0 || image_rgb.empty()) {
+    if (camera->CapFrame(image_rgb) != 0 || image_rgb.empty()) {
         spdlog::error("Failed to capture RGB frame");
         return -22;
     }
@@ -1023,7 +1043,7 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         }
     }).detach();
 
-    if (g_camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
+    if (camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
         spdlog::error("Failed to capture point cloud or empty");
         return -23;
     }

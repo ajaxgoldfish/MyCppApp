@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 
 static void checkTC(LX_STATE val) {
     if (val != LX_SUCCESS) {
@@ -12,16 +13,31 @@ static void checkTC(LX_STATE val) {
     }
 }
 
+std::vector<std::string> LanxinCamera::DiscoverCameraIps() {
+    LxDeviceInfo *device_list = nullptr;
+    int device_num = 0;
+    checkTC(DcGetDeviceList(&device_list, &device_num));
+
+    std::vector<std::string> camera_ips;
+    std::unordered_set<std::string> seen_ips;
+    if (device_num > 0) {
+        camera_ips.reserve(static_cast<size_t>(device_num));
+    }
+
+    for (int i = 0; i < device_num; ++i) {
+        const std::string camera_ip = device_list[i].ip;
+        if (!camera_ip.empty() && seen_ips.insert(camera_ip).second) {
+            camera_ips.push_back(camera_ip);
+        }
+    }
+
+    spdlog::info("Discovered {} LanxinCamera device(s)", camera_ips.size());
+    return camera_ips;
+}
+
 int LanxinCamera::connect() {
     // 连接指定 IP 的蓝芯相机，并准备 RGB 与深度数据流。
     // 成功后缓存图像尺寸、数据类型和相机内参，为后续取图和点云转换提供基础参数。
-    int device_num = 0;
-    checkTC(DcGetDeviceList(&p_device_list, &device_num));
-    if (device_num <= 0) {
-        spdlog::warn("未发现任何设备");
-        return -1;
-    }
-
     LxDeviceInfo device_info;
     const auto open_mode = static_cast<LX_OPEN_MODE>(OPEN_BY_IP);
     const char *open_param = camera_ip_.c_str();

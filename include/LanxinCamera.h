@@ -5,10 +5,14 @@
 #include <pcl/point_types.h>
 #include <string>
 #include <utility>
+#include <vector>
 #include "lx_camera_api.h"
 
 class LanxinCamera final {
 public:
+    // 枚举当前 SDK 能发现的全部相机 IP，供初始化阶段一次性建立连接池。
+    static std::vector<std::string> DiscoverCameraIps();
+
     // 构造时立即按 IP 建立连接，使调用方只需关注取 RGB 或点云数据。
     explicit LanxinCamera(std::string cameraIp) : camera_ip_(std::move(cameraIp)) {
         connect();
@@ -41,7 +45,6 @@ private:
     // 保存 SDK 句柄和图像参数，后续每次取帧都复用这些连接状态。
     int connect();
 
-    LxDeviceInfo *p_device_list = nullptr;
     DcHandle handle = 0;
     std::string camera_ip_;
     int rgb_data_type = 0;

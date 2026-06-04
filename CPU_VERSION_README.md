@@ -2,7 +2,7 @@
 
 ## API
 
-1. `bs_yzx_init(bool isDebug)` initializes the camera + GPU pipeline and CNN settings from `cnn.ini`.
+1. `bs_yzx_init(bool isDebug)` initializes the GPU pipeline, discovers every Lanxin camera, and opens all camera streams.
 2. `bs_yzx_object_detection_lanxin(zzb::Box boxArr[], const char *cameraIp, const char *intrinsicExtrinsicPath)` reads `intrinsics` and `extrinsics` from `intrinsicExtrinsicPath`, captures from the Lanxin camera at `cameraIp`, runs GPU detection, and writes results.
 
 `taskId` is no longer part of the public API. Each run creates a timestamp directory:
@@ -14,7 +14,7 @@ res/<timestamp>/
   vis_on_orig.jpg
 ```
 
-The local file mode and CPU mode have been removed. `cameraIp` and `intrinsicExtrinsicPath` are required. The program opens the Lanxin camera by that IP address, reads calibration from the supplied path, captures data, and writes raw data plus results to `res/<timestamp>/`. The example executables accept the camera IP as the first command-line argument and the calibration path as the second. Legacy node names `intrinsicRGB` and `extrinsicRGB` are still accepted.
+The local file mode and CPU mode have been removed. During initialization, every discovered Lanxin camera is opened and kept streaming. Detection only selects an already-open camera by `cameraIp`; switching IP does not stop, close, or reopen any camera. All camera connections close when the DLL/process exits. `cameraIp` and `intrinsicExtrinsicPath` are required. Legacy calibration node names `intrinsicRGB` and `extrinsicRGB` are still accepted.
 
 ## Return Values
 
@@ -24,7 +24,7 @@ The local file mode and CPU mode have been removed. `cameraIp` and `intrinsicExt
 Common error codes:
 
 - `-10`: pipeline not initialized
-- `-11`: camera not initialized or not open
+- `-11`: camera discovery/initialization failed, or requested camera IP is not ready
 - `-12`: null box array
 - `-13`: empty camera IP
 - `-14`: empty intrinsic/extrinsic path
