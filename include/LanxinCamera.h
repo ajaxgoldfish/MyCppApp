@@ -30,8 +30,6 @@ public:
 
     int CapFrame(cv::Mat &rgbMat);
 
-    int CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc);
-
     ~LanxinCamera() {
         if (isConnect) {
             DcStopStream(handle);
