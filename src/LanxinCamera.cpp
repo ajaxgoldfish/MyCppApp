@@ -224,3 +224,79 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
     spdlog::error("获取 RGB 数据失败，3秒内重试仍未成功");
     return last_error;
 }
+
+int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) {
+    if (!isConnect) {
+        if (const auto code = connect(); code != 0) {
+            return -5;
+        }
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    int last_error = -1;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
+        if (LX_SUCCESS != ret) {
+            spdlog::warn("LX_CMD_GET_NEW_FRAME returned {}, error={}",
+                         static_cast<int>(ret), DcGetErrorString(ret));
+        }
+        if ((LX_SUCCESS != ret) && (LX_E_FRAME_ID_NOT_MATCH != ret) && (LX_E_FRAME_MULTI_MACHINE != ret)) {
+            if (LX_E_RECONNECTING == ret) {
+                spdlog::warn("设备正在重连中");
+            }
+            last_error = -1;
+        } else {
+            bool rgb_ok = false;
+            unsigned char *data_ptr = nullptr;
+            const auto rgb_ret =
+                DcGetPtrValue(handle, LX_PTR_2D_IMAGE_DATA, reinterpret_cast<void **>(&data_ptr));
+            if (LX_SUCCESS == rgb_ret && data_ptr != nullptr) {
+                rgbMat = cv::Mat(rgb_height, rgb_width, CV_MAKETYPE(rgb_data_type, rgb_channles), data_ptr);
+                rgb_ok = !rgbMat.empty();
+            } else {
+                spdlog::warn("DcGetPtrValue(LX_PTR_2D_IMAGE_DATA) returned {}, error={}",
+                             static_cast<int>(rgb_ret), DcGetErrorString(rgb_ret));
+            }
+
+            bool pc_ok = false;
+            float *xyz_data = nullptr;
+            const auto xyz_ret =
+                DcGetPtrValue(handle, LX_PTR_XYZ_DATA, reinterpret_cast<void **>(&xyz_data));
+            if (LX_SUCCESS == xyz_ret && xyz_data != nullptr) {
+                pc.clear();
+                const int total = tof_width * tof_height;
+                pc.points.reserve(total);
+                for (int i = 0; i < total; ++i) {
+                    float x = xyz_data[i * 3];
+                    float y = xyz_data[i * 3 + 1];
+                    float z = xyz_data[i * 3 + 2];
+                    if (x == 0 && y == 0 && z == 0) {
+                        continue;
+                    }
+                    pc.points.emplace_back(x / 1000, y / 1000, z / 1000);
+                }
+                pc.width = pc.points.size();
+                pc.height = 1;
+                pc.is_dense = false;
+                pc_ok = !pc.empty();
+            } else {
+                spdlog::warn("DcGetPtrValue(LX_PTR_XYZ_DATA) returned {}, error={}",
+                             static_cast<int>(xyz_ret), DcGetErrorString(xyz_ret));
+            }
+
+            if (rgb_ok && pc_ok) {
+                return 0;
+            }
+            if (!rgb_ok) {
+                last_error = -3;
+            }
+            if (!pc_ok) {
+                last_error = -2;
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    spdlog::error("获取 RGB/点云数据失败，3秒内重试仍未成功");
+    return last_error;
+}

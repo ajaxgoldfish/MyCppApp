@@ -1178,7 +1178,12 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
     std::error_code ec;
     fs::create_directories(output_dir, ec);
 
-    if (camera->CapFrame(image_rgb) != 0 || image_rgb.empty()) {
+    const int capture_result = camera->CapFrame(image_rgb, *point_cloud);
+    if (capture_result != 0 || image_rgb.empty() || point_cloud->empty()) {
+        if (capture_result == -2 || (capture_result == 0 && point_cloud->empty())) {
+            spdlog::error("Failed to capture point cloud or empty");
+            return -23;
+        }
         spdlog::error("Failed to capture RGB frame");
         return -22;
     }
@@ -1192,18 +1197,13 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         }
     }).detach();
 
-    if (camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
-        spdlog::error("Failed to capture point cloud or empty");
-        return -23;
-    }
-
     const fs::path pcdPath = output_dir / "cloud_orig.pcd";
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_clone(new pcl::PointCloud<pcl::PointXYZ>(*point_cloud));
     std::thread([pcdPath, cloud_clone]() {
         pcl::io::savePCDFileASCII(pcdPath.string(), *cloud_clone);
     }).detach();
 
-    // RF-DETR 负责从 RGB 图中得到实例 mask，后续 3D 步骤都以这些 mask 为目标区域。
+    // 模型推理负责从 RGB 图中得到实例 mask，后续 3D 步骤都以这些 mask 为目标区域。
     auto t1 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 1: Data Loading took {:.3f} ms", std::chrono::duration<double, std::milli>(t1 - time_start).count());
 
