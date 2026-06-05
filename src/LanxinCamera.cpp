@@ -13,6 +13,11 @@ static void checkTC(LX_STATE val) {
     }
 }
 
+static long long elapsed_ms_since(const std::chrono::steady_clock::time_point& start_time) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time).count();
+}
+
 std::vector<std::string> LanxinCamera::DiscoverCameraIps() {
     LxDeviceInfo *device_list = nullptr;
     int device_num = 0;
@@ -126,16 +131,27 @@ int LanxinCamera::connect() {
 }
 
 int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
+    spdlog::info("[CapFrame][PointCloud] start ip={}, connected={}, handle={}, cached_tof={}x{}",
+                 camera_ip_, isConnect, handle, tof_width, tof_height);
     if (!isConnect) {
+        spdlog::warn("[CapFrame][PointCloud] ip={} is not connected, try reconnect", camera_ip_);
         if (const auto code = connect(); code != 0) {
+            spdlog::error("[CapFrame][PointCloud] reconnect failed, ip={}, code={}", camera_ip_, code);
             return -5;
         }
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto start_time = std::chrono::steady_clock::now();
+    const auto deadline = start_time + std::chrono::seconds(3);
     int last_error = -1;
+    int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
+        ++attempt;
+        spdlog::info("[CapFrame][PointCloud] attempt={}, elapsed={}ms, call LX_CMD_GET_NEW_FRAME",
+                     attempt, elapsed_ms_since(start_time));
         const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
+        spdlog::info("[CapFrame][PointCloud] attempt={}, LX_CMD_GET_NEW_FRAME ret={}, error={}",
+                     attempt, static_cast<int>(ret), DcGetErrorString(ret));
         if (LX_SUCCESS != ret) {
             spdlog::warn("LX_CMD_GET_NEW_FRAME returned {}, error={}",
                          static_cast<int>(ret), DcGetErrorString(ret));
@@ -144,12 +160,19 @@ int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
             if (LX_E_RECONNECTING == ret) {
                 spdlog::warn("设备正在重连中");
             }
+            spdlog::warn("[CapFrame][PointCloud] attempt={}, frame status rejected, ret={}, elapsed={}ms",
+                         attempt, static_cast<int>(ret), elapsed_ms_since(start_time));
             last_error = -1;
         } else {
+            spdlog::info("[CapFrame][PointCloud] attempt={}, frame status accepted, ret={}, read LX_PTR_XYZ_DATA",
+                         attempt, static_cast<int>(ret));
             // 读取 SDK 输出的 XYZ 深度数据，并转换成以米为单位的 PCL 点云。
             float *xyz_data = nullptr;
             const auto get_ptr_ret =
                 DcGetPtrValue(handle, LX_PTR_XYZ_DATA, reinterpret_cast<void **>(&xyz_data));
+            spdlog::info("[CapFrame][PointCloud] attempt={}, DcGetPtrValue(LX_PTR_XYZ_DATA) ret={}, error={}, ptr={}",
+                         attempt, static_cast<int>(get_ptr_ret), DcGetErrorString(get_ptr_ret),
+                         static_cast<const void *>(xyz_data));
             if (LX_SUCCESS == get_ptr_ret && xyz_data != nullptr) {
                 pc.clear();
                 const int total = tof_width * tof_height;
@@ -166,33 +189,56 @@ int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
                 pc.width = pc.points.size();
                 pc.height = 1;
                 pc.is_dense = false;
+                spdlog::info("[CapFrame][PointCloud] attempt={}, converted point cloud, total_pixels={}, valid_points={}",
+                             attempt, total, pc.points.size());
                 if (!pc.empty()) {
+                    spdlog::info("[CapFrame][PointCloud] success ip={}, attempt={}, elapsed={}ms, valid_points={}",
+                                 camera_ip_, attempt, elapsed_ms_since(start_time), pc.points.size());
                     return 0;
                 }
+                spdlog::warn("[CapFrame][PointCloud] attempt={}, XYZ pointer is valid but point cloud is empty",
+                             attempt);
             } else {
                 spdlog::warn("DcGetPtrValue(LX_PTR_XYZ_DATA) returned {}, error={}",
                              static_cast<int>(get_ptr_ret), DcGetErrorString(get_ptr_ret));
+                spdlog::warn("[CapFrame][PointCloud] attempt={}, failed to get XYZ pointer, ret={}, ptr={}",
+                             attempt, static_cast<int>(get_ptr_ret), static_cast<const void *>(xyz_data));
             }
             last_error = -2;
         }
 
+        spdlog::info("[CapFrame][PointCloud] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                     attempt, elapsed_ms_since(start_time));
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     spdlog::error("获取点云数据失败，3秒内重试仍未成功");
+    spdlog::error("[CapFrame][PointCloud] failed ip={}, attempts={}, elapsed={}ms, last_error={}",
+                  camera_ip_, attempt, elapsed_ms_since(start_time), last_error);
     return last_error;
 }
 
 int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
+    spdlog::info("[CapFrame][RGB] start ip={}, connected={}, handle={}, cached_rgb={}x{}, channels={}, type={}",
+                 camera_ip_, isConnect, handle, rgb_width, rgb_height, rgb_channles, rgb_data_type);
     if (!isConnect) {
+        spdlog::warn("[CapFrame][RGB] ip={} is not connected, try reconnect", camera_ip_);
         if (const auto code = connect(); code != 0) {
+            spdlog::error("[CapFrame][RGB] reconnect failed, ip={}, code={}", camera_ip_, code);
             return -5;
         }
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto start_time = std::chrono::steady_clock::now();
+    const auto deadline = start_time + std::chrono::seconds(3);
     int last_error = -1;
+    int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
+        ++attempt;
+        spdlog::info("[CapFrame][RGB] attempt={}, elapsed={}ms, call LX_CMD_GET_NEW_FRAME",
+                     attempt, elapsed_ms_since(start_time));
         const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
+        spdlog::info("[CapFrame][RGB] attempt={}, LX_CMD_GET_NEW_FRAME ret={}, error={}",
+                     attempt, static_cast<int>(ret), DcGetErrorString(ret));
         if (LX_SUCCESS != ret) {
             spdlog::warn("LX_CMD_GET_NEW_FRAME returned {}, error={}",
                          static_cast<int>(ret), DcGetErrorString(ret));
@@ -201,26 +247,46 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
             if (LX_E_RECONNECTING == ret) {
                 spdlog::warn("设备正在重连中");
             }
+            spdlog::warn("[CapFrame][RGB] attempt={}, frame status rejected, ret={}, elapsed={}ms",
+                         attempt, static_cast<int>(ret), elapsed_ms_since(start_time));
             last_error = -1;
         } else {
+            spdlog::info("[CapFrame][RGB] attempt={}, frame status accepted, ret={}, read LX_PTR_2D_IMAGE_DATA",
+                         attempt, static_cast<int>(ret));
             // 读取 SDK 当前 RGB 缓冲区，并封装为 OpenCV Mat 供检测模型使用。
             unsigned char *data_ptr = nullptr;
             const auto get_ptr_ret =
                 DcGetPtrValue(handle, LX_PTR_2D_IMAGE_DATA, reinterpret_cast<void **>(&data_ptr));
+            spdlog::info("[CapFrame][RGB] attempt={}, DcGetPtrValue(LX_PTR_2D_IMAGE_DATA) ret={}, error={}, ptr={}",
+                         attempt, static_cast<int>(get_ptr_ret), DcGetErrorString(get_ptr_ret),
+                         static_cast<const void *>(data_ptr));
             if (LX_SUCCESS == get_ptr_ret && data_ptr != nullptr) {
                 rgbMat = cv::Mat(rgb_height, rgb_width, CV_MAKETYPE(rgb_data_type, rgb_channles), data_ptr);
+                spdlog::info("[CapFrame][RGB] attempt={}, wrapped cv::Mat rows={}, cols={}, channels={}, empty={}",
+                             attempt, rgbMat.rows, rgbMat.cols, rgbMat.channels(), rgbMat.empty());
                 if (!rgbMat.empty()) {
+                    spdlog::info("[CapFrame][RGB] success ip={}, attempt={}, elapsed={}ms, size={}x{}, channels={}",
+                                 camera_ip_, attempt, elapsed_ms_since(start_time),
+                                 rgbMat.cols, rgbMat.rows, rgbMat.channels());
                     return 0;
                 }
+                spdlog::warn("[CapFrame][RGB] attempt={}, RGB pointer is valid but cv::Mat is empty",
+                             attempt);
             } else {
                 spdlog::warn("DcGetPtrValue(LX_PTR_2D_IMAGE_DATA) returned {}, error={}",
                              static_cast<int>(get_ptr_ret), DcGetErrorString(get_ptr_ret));
+                spdlog::warn("[CapFrame][RGB] attempt={}, failed to get RGB pointer, ret={}, ptr={}",
+                             attempt, static_cast<int>(get_ptr_ret), static_cast<const void *>(data_ptr));
             }
             last_error = -3;
         }
 
+        spdlog::info("[CapFrame][RGB] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                     attempt, elapsed_ms_since(start_time));
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     spdlog::error("获取 RGB 数据失败，3秒内重试仍未成功");
+    spdlog::error("[CapFrame][RGB] failed ip={}, attempts={}, elapsed={}ms, last_error={}",
+                  camera_ip_, attempt, elapsed_ms_since(start_time), last_error);
     return last_error;
 }
