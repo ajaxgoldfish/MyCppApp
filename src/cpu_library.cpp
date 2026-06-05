@@ -1182,6 +1182,7 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         spdlog::error("Failed to capture RGB frame");
         return -22;
     }
+    image_rgb = image_rgb.clone();
 
     const fs::path rgbPath = output_dir / "rgb_orig.jpg";
     cv::Mat image_rgb_clone = image_rgb.clone();
