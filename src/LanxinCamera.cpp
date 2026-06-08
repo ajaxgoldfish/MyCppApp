@@ -84,6 +84,13 @@ int LanxinCamera::connect() {
         // 打开 RGB 到深度坐标的对齐，使 2D mask 能和点云建立空间对应关系。
         checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_TO_DEPTH, true));
 
+        // 使用软触发模式：每次 CapFrame 主动触发一次曝光，再读取对应的一帧数据。
+        checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_MODE, LX_TRIGGER_SOFTWARE));
+        checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_DELAY_TIME, 0));
+        checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_MIN_PERIOD_TIME, 100000));
+        checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_FRAME_COUNT, 1));
+        spdlog::info("Software trigger configured: delay=0us, min_period=100000us, frame_count=1");
+
         // 读取图像参数后，CapFrame 可以按正确尺寸和格式构造 OpenCV/PCL 数据。
         LxIntValueInfo int_value;
         checkTC(DcGetIntValue(handle, LX_INT_3D_IMAGE_WIDTH, &int_value));
@@ -147,6 +154,24 @@ int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
     int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         ++attempt;
+        spdlog::info("[CapFrame][PointCloud] attempt={}, elapsed={}ms, call LX_CMD_SOFTWARE_TRIGGER",
+                     attempt, elapsed_ms_since(start_time));
+        const auto trigger_ret = DcSetCmd(handle, LX_CMD_SOFTWARE_TRIGGER);
+        spdlog::info("[CapFrame][PointCloud] attempt={}, LX_CMD_SOFTWARE_TRIGGER ret={}, error={}",
+                     attempt, static_cast<int>(trigger_ret), DcGetErrorString(trigger_ret));
+        if (LX_SUCCESS != trigger_ret) {
+            if (LX_E_RECONNECTING == trigger_ret) {
+                spdlog::warn("设备正在重连中");
+            }
+            spdlog::warn("[CapFrame][PointCloud] attempt={}, software trigger failed, ret={}, elapsed={}ms",
+                         attempt, static_cast<int>(trigger_ret), elapsed_ms_since(start_time));
+            last_error = -1;
+            spdlog::info("[CapFrame][PointCloud] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                         attempt, elapsed_ms_since(start_time));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
         spdlog::info("[CapFrame][PointCloud] attempt={}, elapsed={}ms, call LX_CMD_GET_NEW_FRAME",
                      attempt, elapsed_ms_since(start_time));
         const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
@@ -234,6 +259,24 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
     int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         ++attempt;
+        spdlog::info("[CapFrame][RGB] attempt={}, elapsed={}ms, call LX_CMD_SOFTWARE_TRIGGER",
+                     attempt, elapsed_ms_since(start_time));
+        const auto trigger_ret = DcSetCmd(handle, LX_CMD_SOFTWARE_TRIGGER);
+        spdlog::info("[CapFrame][RGB] attempt={}, LX_CMD_SOFTWARE_TRIGGER ret={}, error={}",
+                     attempt, static_cast<int>(trigger_ret), DcGetErrorString(trigger_ret));
+        if (LX_SUCCESS != trigger_ret) {
+            if (LX_E_RECONNECTING == trigger_ret) {
+                spdlog::warn("设备正在重连中");
+            }
+            spdlog::warn("[CapFrame][RGB] attempt={}, software trigger failed, ret={}, elapsed={}ms",
+                         attempt, static_cast<int>(trigger_ret), elapsed_ms_since(start_time));
+            last_error = -1;
+            spdlog::info("[CapFrame][RGB] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                         attempt, elapsed_ms_since(start_time));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
         spdlog::info("[CapFrame][RGB] attempt={}, elapsed={}ms, call LX_CMD_GET_NEW_FRAME",
                      attempt, elapsed_ms_since(start_time));
         const auto ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
