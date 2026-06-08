@@ -1178,7 +1178,12 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
     std::error_code ec;
     fs::create_directories(output_dir, ec);
 
-    if (camera->CapFrame(image_rgb) != 0 || image_rgb.empty()) {
+    const int capture_result = camera->CapFrame(image_rgb, *point_cloud);
+    if (capture_result != 0 || image_rgb.empty() || point_cloud->empty()) {
+        if (capture_result == -2 || (capture_result == 0 && point_cloud->empty())) {
+            spdlog::error("Failed to capture point cloud or empty");
+            return -23;
+        }
         spdlog::error("Failed to capture RGB frame");
         return -22;
     }
@@ -1191,11 +1196,6 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
             spdlog::warn("Failed to save original RGB");
         }
     }).detach();
-
-    if (camera->CapFrame(*point_cloud) != 0 || point_cloud->empty()) {
-        spdlog::error("Failed to capture point cloud or empty");
-        return -23;
-    }
 
     const fs::path pcdPath = output_dir / "cloud_orig.pcd";
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_clone(new pcl::PointCloud<pcl::PointXYZ>(*point_cloud));

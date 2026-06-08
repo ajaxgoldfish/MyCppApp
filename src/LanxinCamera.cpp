@@ -81,8 +81,11 @@ int LanxinCamera::connect() {
         checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, &test_rgb));
         spdlog::info("test_depth:{} test_amp:{} test_rgb:{}", test_depth, test_amp, test_rgb);
 
-        // 打开 RGB 到深度坐标的对齐，使 2D mask 能和点云建立空间对应关系。
-        checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_TO_DEPTH, true));
+        // 打开深度到 RGB 坐标的对齐，使 RGB mask 能和点云建立空间对应关系。
+        checkTC(DcSetIntValue(handle, LX_INT_RGBD_ALIGN_MODE, DEPTH_TO_RGB));
+        LxIntValueInfo align_mode;
+        checkTC(DcGetIntValue(handle, LX_INT_RGBD_ALIGN_MODE, &align_mode));
+        spdlog::info("RGBD align mode: {}", align_mode.cur_value);
 
         // 使用软触发模式：每次 CapFrame 主动触发一次曝光，再读取对应的一帧数据。
         checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_MODE, LX_TRIGGER_SOFTWARE));
@@ -330,6 +333,161 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
     }
     spdlog::error("获取 RGB 数据失败，3秒内重试仍未成功");
     spdlog::error("[CapFrame][RGB] failed ip={}, attempts={}, elapsed={}ms, last_error={}",
+                  camera_ip_, attempt, elapsed_ms_since(start_time), last_error);
+    return last_error;
+}
+
+int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) {
+    spdlog::info("[CapFrame][FrameData] start ip={}, connected={}, handle={}",
+                 camera_ip_, isConnect, handle);
+    if (!isConnect) {
+        spdlog::warn("[CapFrame][FrameData] ip={} is not connected, try reconnect", camera_ip_);
+        if (const auto code = connect(); code != 0) {
+            spdlog::error("[CapFrame][FrameData] reconnect failed, ip={}, code={}", camera_ip_, code);
+            return -5;
+        }
+    }
+
+    const auto start_time = std::chrono::steady_clock::now();
+    const auto deadline = start_time + std::chrono::seconds(3);
+    int last_error = -1;
+    int attempt = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        ++attempt;
+        spdlog::info("[CapFrame][FrameData] attempt={}, elapsed={}ms, call LX_CMD_SOFTWARE_TRIGGER",
+                     attempt, elapsed_ms_since(start_time));
+        const auto trigger_ret = DcSetCmd(handle, LX_CMD_SOFTWARE_TRIGGER);
+        spdlog::info("[CapFrame][FrameData] attempt={}, LX_CMD_SOFTWARE_TRIGGER ret={}, error={}",
+                     attempt, static_cast<int>(trigger_ret), DcGetErrorString(trigger_ret));
+        if (LX_SUCCESS != trigger_ret) {
+            if (LX_E_RECONNECTING == trigger_ret) {
+                spdlog::warn("设备正在重连中");
+            }
+            last_error = -1;
+            spdlog::info("[CapFrame][FrameData] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                         attempt, elapsed_ms_since(start_time));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
+        spdlog::info("[CapFrame][FrameData] attempt={}, elapsed={}ms, call LX_CMD_GET_NEW_FRAME",
+                     attempt, elapsed_ms_since(start_time));
+        const auto frame_ret = DcSetCmd(handle, LX_CMD_GET_NEW_FRAME);
+        spdlog::info("[CapFrame][FrameData] attempt={}, LX_CMD_GET_NEW_FRAME ret={}, error={}",
+                     attempt, static_cast<int>(frame_ret), DcGetErrorString(frame_ret));
+        if ((LX_SUCCESS != frame_ret) &&
+            (LX_E_FRAME_ID_NOT_MATCH != frame_ret) &&
+            (LX_E_FRAME_MULTI_MACHINE != frame_ret)) {
+            if (LX_E_RECONNECTING == frame_ret) {
+                spdlog::warn("设备正在重连中");
+            }
+            last_error = -1;
+            spdlog::info("[CapFrame][FrameData] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                         attempt, elapsed_ms_since(start_time));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
+        FrameInfo *frame_ptr = nullptr;
+        const auto get_frame_ret =
+            DcGetPtrValue(handle, LX_PTR_FRAME_DATA, reinterpret_cast<void **>(&frame_ptr));
+        spdlog::info("[CapFrame][FrameData] attempt={}, DcGetPtrValue(LX_PTR_FRAME_DATA) ret={}, error={}, ptr={}",
+                     attempt, static_cast<int>(get_frame_ret), DcGetErrorString(get_frame_ret),
+                     static_cast<const void *>(frame_ptr));
+        if (LX_SUCCESS != get_frame_ret || frame_ptr == nullptr) {
+            last_error = -1;
+            spdlog::info("[CapFrame][FrameData] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                         attempt, elapsed_ms_since(start_time));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
+        spdlog::info("[CapFrame][FrameData] attempt={}, frame_state={}, error={}",
+                     attempt, static_cast<int>(frame_ptr->frame_state), DcGetErrorString(frame_ptr->frame_state));
+        if (frame_ptr->reserve_data != nullptr) {
+            const auto *extend = static_cast<const FrameExtendInfo *>(frame_ptr->reserve_data);
+            spdlog::info("[CapFrame][FrameData] attempt={}, frame_id depth={}, amp={}, rgb={}, app={}",
+                         attempt, extend->depth_frame_id, extend->amp_frame_id,
+                         extend->rgb_frame_id, extend->app_frame_id);
+        }
+        if ((LX_SUCCESS != frame_ptr->frame_state) &&
+            (LX_E_FRAME_ID_NOT_MATCH != frame_ptr->frame_state) &&
+            (LX_E_FRAME_MULTI_MACHINE != frame_ptr->frame_state)) {
+            last_error = -1;
+            spdlog::info("[CapFrame][FrameData] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                         attempt, elapsed_ms_since(start_time));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
+        bool rgb_ok = false;
+        const auto &rgb_data = frame_ptr->rgb_data;
+        spdlog::info("[CapFrame][FrameData] attempt={}, rgb ptr={}, size={}x{}, channels={}, type={}",
+                     attempt, rgb_data.frame_data, rgb_data.frame_width, rgb_data.frame_height,
+                     rgb_data.frame_channel, static_cast<int>(rgb_data.frame_data_type));
+        if (rgb_data.frame_data != nullptr &&
+            rgb_data.frame_width > 0 &&
+            rgb_data.frame_height > 0 &&
+            rgb_data.frame_channel > 0) {
+            rgbMat = cv::Mat(rgb_data.frame_height, rgb_data.frame_width,
+                             CV_MAKETYPE(static_cast<int>(rgb_data.frame_data_type), rgb_data.frame_channel),
+                             rgb_data.frame_data);
+            rgb_ok = !rgbMat.empty();
+        }
+
+        bool pc_ok = false;
+        const auto &depth_data = frame_ptr->depth_data;
+        spdlog::info("[CapFrame][FrameData] attempt={}, depth ptr={}, size={}x{}, channels={}, type={}",
+                     attempt, depth_data.frame_data, depth_data.frame_width, depth_data.frame_height,
+                     depth_data.frame_channel, static_cast<int>(depth_data.frame_data_type));
+        if (depth_data.frame_data != nullptr &&
+            depth_data.frame_width > 0 &&
+            depth_data.frame_height > 0) {
+            float *xyz_data = nullptr;
+            const auto xyz_ret =
+                DcGetPtrValue(handle, LX_PTR_XYZ_DATA, reinterpret_cast<void **>(&xyz_data));
+            spdlog::info("[CapFrame][FrameData] attempt={}, DcGetPtrValue(LX_PTR_XYZ_DATA) ret={}, error={}, ptr={}",
+                         attempt, static_cast<int>(xyz_ret), DcGetErrorString(xyz_ret),
+                         static_cast<const void *>(xyz_data));
+            if (LX_SUCCESS == xyz_ret && xyz_data != nullptr) {
+                pc.clear();
+                const int total = depth_data.frame_width * depth_data.frame_height;
+                pc.points.reserve(total);
+                for (int i = 0; i < total; ++i) {
+                    const float x = xyz_data[i * 3];
+                    const float y = xyz_data[i * 3 + 1];
+                    const float z = xyz_data[i * 3 + 2];
+                    if (x == 0 && y == 0 && z == 0) {
+                        continue;
+                    }
+                    pc.points.emplace_back(x / 1000, y / 1000, z / 1000);
+                }
+                pc.width = pc.points.size();
+                pc.height = 1;
+                pc.is_dense = false;
+                pc_ok = !pc.empty();
+                spdlog::info("[CapFrame][FrameData] attempt={}, converted point cloud, total_pixels={}, valid_points={}",
+                             attempt, total, pc.points.size());
+            }
+        }
+
+        if (rgb_ok && pc_ok) {
+            spdlog::info("[CapFrame][FrameData] success ip={}, attempt={}, elapsed={}ms, rgb={}x{}, valid_points={}",
+                         camera_ip_, attempt, elapsed_ms_since(start_time),
+                         rgbMat.cols, rgbMat.rows, pc.points.size());
+            return 0;
+        }
+
+        last_error = rgb_ok ? -2 : -3;
+        spdlog::warn("[CapFrame][FrameData] attempt={}, incomplete frame data, rgb_ok={}, pc_ok={}, last_error={}",
+                     attempt, rgb_ok, pc_ok, last_error);
+        spdlog::info("[CapFrame][FrameData] attempt={}, sleep 200ms before retry, elapsed={}ms",
+                     attempt, elapsed_ms_since(start_time));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    spdlog::error("获取 FrameData RGB/点云数据失败，3秒内重试仍未成功");
+    spdlog::error("[CapFrame][FrameData] failed ip={}, attempts={}, elapsed={}ms, last_error={}",
                   camera_ip_, attempt, elapsed_ms_since(start_time), last_error);
     return last_error;
 }
