@@ -5,6 +5,10 @@
 #include <thread>
 #include <unordered_set>
 
+namespace {
+    int g_capture_retry_timeout_ms = 3000;
+}
+
 static void checkTC(LX_STATE val) {
     if (val != LX_SUCCESS) {
         std::string message = std::string("LanxinCamera error: ") + DcGetErrorString(val);
@@ -38,6 +42,15 @@ std::vector<std::string> LanxinCamera::DiscoverCameraIps() {
 
     spdlog::info("Discovered {} LanxinCamera device(s)", camera_ips.size());
     return camera_ips;
+}
+
+void LanxinCamera::SetCaptureRetryTimeoutMs(const int timeoutMs) {
+    g_capture_retry_timeout_ms = timeoutMs > 0 ? timeoutMs : 3000;
+    spdlog::info("LanxinCamera capture retry timeout set to {}ms", g_capture_retry_timeout_ms);
+}
+
+int LanxinCamera::GetCaptureRetryTimeoutMs() {
+    return g_capture_retry_timeout_ms;
 }
 
 int LanxinCamera::connect() {
@@ -150,7 +163,8 @@ int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
     }
 
     const auto start_time = std::chrono::steady_clock::now();
-    const auto deadline = start_time + std::chrono::seconds(3);
+    const int timeout_ms = GetCaptureRetryTimeoutMs();
+    const auto deadline = start_time + std::chrono::milliseconds(timeout_ms);
     int last_error = -1;
     int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -237,9 +251,9 @@ int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
                      attempt, elapsed_ms_since(start_time));
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    spdlog::error("获取点云数据失败，3秒内重试仍未成功");
-    spdlog::error("[CapFrame][PointCloud] failed ip={}, attempts={}, elapsed={}ms, last_error={}",
-                  camera_ip_, attempt, elapsed_ms_since(start_time), last_error);
+    spdlog::error("获取点云数据失败，{}ms内重试仍未成功", timeout_ms);
+    spdlog::error("[CapFrame][PointCloud] failed ip={}, attempts={}, elapsed={}ms, timeout={}ms, last_error={}",
+                  camera_ip_, attempt, elapsed_ms_since(start_time), timeout_ms, last_error);
     return last_error;
 }
 
@@ -255,7 +269,8 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
     }
 
     const auto start_time = std::chrono::steady_clock::now();
-    const auto deadline = start_time + std::chrono::seconds(3);
+    const int timeout_ms = GetCaptureRetryTimeoutMs();
+    const auto deadline = start_time + std::chrono::milliseconds(timeout_ms);
     int last_error = -1;
     int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -329,9 +344,9 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
                      attempt, elapsed_ms_since(start_time));
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
-    spdlog::error("获取 RGB 数据失败，3秒内重试仍未成功");
-    spdlog::error("[CapFrame][RGB] failed ip={}, attempts={}, elapsed={}ms, last_error={}",
-                  camera_ip_, attempt, elapsed_ms_since(start_time), last_error);
+    spdlog::error("获取 RGB 数据失败，{}ms内重试仍未成功", timeout_ms);
+    spdlog::error("[CapFrame][RGB] failed ip={}, attempts={}, elapsed={}ms, timeout={}ms, last_error={}",
+                  camera_ip_, attempt, elapsed_ms_since(start_time), timeout_ms, last_error);
     return last_error;
 }
 
@@ -347,7 +362,8 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
     }
 
     const auto start_time = std::chrono::steady_clock::now();
-    const auto deadline = start_time + std::chrono::seconds(3);
+    const int timeout_ms = GetCaptureRetryTimeoutMs();
+    const auto deadline = start_time + std::chrono::milliseconds(timeout_ms);
     int last_error = -1;
     int attempt = 0;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -484,8 +500,8 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    spdlog::error("获取 FrameData RGB/点云数据失败，3秒内重试仍未成功");
-    spdlog::error("[CapFrame][FrameData] failed ip={}, attempts={}, elapsed={}ms, last_error={}",
-                  camera_ip_, attempt, elapsed_ms_since(start_time), last_error);
+    spdlog::error("获取 FrameData RGB/点云数据失败，{}ms内重试仍未成功", timeout_ms);
+    spdlog::error("[CapFrame][FrameData] failed ip={}, attempts={}, elapsed={}ms, timeout={}ms, last_error={}",
+                  camera_ip_, attempt, elapsed_ms_since(start_time), timeout_ms, last_error);
     return last_error;
 }

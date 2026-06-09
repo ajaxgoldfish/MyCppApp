@@ -12,6 +12,8 @@ class LanxinCamera final {
 public:
     // 枚举当前 SDK 能发现的全部相机 IP，供初始化阶段一次性建立连接池。
     static std::vector<std::string> DiscoverCameraIps();
+    static void SetCaptureRetryTimeoutMs(int timeoutMs);
+    static int GetCaptureRetryTimeoutMs();
 
     // 构造时立即按 IP 建立连接，使调用方只需关注取 RGB 或点云数据。
     explicit LanxinCamera(std::string cameraIp) : camera_ip_(std::move(cameraIp)) {

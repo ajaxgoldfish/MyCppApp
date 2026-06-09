@@ -59,6 +59,7 @@ namespace {
     bool g_rfdetr_clip_masks_to_boxes = false;
     std::string g_rfdetr_score_activation = "sigmoid";
     std::string g_rfdetr_mask_output = "logits";
+    int g_capture_retry_timeout_ms = 3000;
 
     // 标定矩阵把 RGB 像素、相机点云和世界坐标连接起来，是后续 3D 位姿解算的基础。
     cv::Mat g_intrinsic;
@@ -341,16 +342,26 @@ namespace {
                     g_rfdetr_exclude_last_class = parse_bool_value(value, g_rfdetr_exclude_last_class);
                 } else if (key_lower == "clip_masks_to_boxes" || key_lower == "rfdetr_clip_masks_to_boxes") {
                     g_rfdetr_clip_masks_to_boxes = parse_bool_value(value, g_rfdetr_clip_masks_to_boxes);
+                } else if (key_lower == "capture_retry_timeout_ms" ||
+                           key_lower == "camera_capture_timeout_ms" ||
+                           key_lower == "capture_timeout_ms") {
+                    const int parsed_value = std::stoi(value);
+                    if (parsed_value <= 0) {
+                        spdlog::warn("[init] Invalid capture retry timeout in {}: {}, use default {}ms",
+                                     g_cnn_config_path, value, g_capture_retry_timeout_ms);
+                        continue;
+                    }
+                    g_capture_retry_timeout_ms = parsed_value;
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("[init] Failed to parse {} in {}: {}", key, g_cnn_config_path, e.what());
             }
         }
 
-        spdlog::info("[init] model_type={}, model={}, RF-DETR input={}x{}, score_threshold={}, mask_threshold={}, activation={}, mask_output={}, exclude_last_class={}, clip_masks_to_boxes={}",
+        spdlog::info("[init] model_type={}, model={}, RF-DETR input={}x{}, score_threshold={}, mask_threshold={}, activation={}, mask_output={}, exclude_last_class={}, clip_masks_to_boxes={}, capture_retry_timeout_ms={}",
                      model_type_name(), g_model_path, g_rfdetr_input_width, g_rfdetr_input_height,
                      g_score_threshold, g_mask_threshold, g_rfdetr_score_activation, g_rfdetr_mask_output,
-                     g_rfdetr_exclude_last_class, g_rfdetr_clip_masks_to_boxes);
+                     g_rfdetr_exclude_last_class, g_rfdetr_clip_masks_to_boxes, g_capture_retry_timeout_ms);
     }
 
 } // 匿名命名空间
@@ -373,10 +384,12 @@ int bs_yzx_init(const bool is_debug) {
     g_mask_threshold = 0.5f;
     g_paint_masks_on_vis = true;
     g_rfdetr_mask_output = "logits";
+    g_capture_retry_timeout_ms = 3000;
 
     if (!g_is_pipeline_ready) {
         try {
             load_cnn_config();
+            LanxinCamera::SetCaptureRetryTimeoutMs(g_capture_retry_timeout_ms);
 
             spdlog::info("Initializing camera + GPU pipeline");
 

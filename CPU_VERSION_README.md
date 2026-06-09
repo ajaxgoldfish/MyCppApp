@@ -16,6 +16,8 @@ res/<timestamp>/
 
 The local file mode and CPU mode have been removed. During initialization, every discovered Lanxin camera is opened and kept streaming. Detection only selects an already-open camera by `cameraIp`; switching IP does not stop, close, or reopen any camera. All camera connections close when the DLL/process exits. `cameraIp` and `intrinsicExtrinsicPath` are required. Legacy calibration node names `intrinsicRGB` and `extrinsicRGB` are still accepted.
 
+`cnn.ini` can set `capture_retry_timeout_ms` to control how long each camera capture call retries before returning `-22` or `-23`.
+
 ## Return Values
 
 - `< 0`: error code
