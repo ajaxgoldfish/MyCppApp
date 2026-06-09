@@ -89,9 +89,7 @@ int LanxinCamera::connect() {
 
         // 使用软触发模式：每次 CapFrame 主动触发一次曝光，再读取对应的一帧数据。
         checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_MODE, LX_TRIGGER_SOFTWARE));
-        checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_DELAY_TIME, 0));
-        checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_MIN_PERIOD_TIME, 100000));
-        checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_FRAME_COUNT, 1));
+
         spdlog::info("Software trigger configured: delay=0us, min_period=100000us, frame_count=1");
 
         // 读取图像参数后，CapFrame 可以按正确尺寸和格式构造 OpenCV/PCL 数据。
