@@ -245,6 +245,14 @@ namespace {
         return camera_it->second.get();
     }
 
+    int box_id_start_for_camera(const std::string& camera_ip) {
+        if (camera_ip == "192.168.3.82:3956") return 100;
+        if (camera_ip == "192.168.4.83:3956") return 200;
+
+        spdlog::warn("No box ID range configured for camera IP: {}, use 0", camera_ip);
+        return 0;
+    }
+
     // 配置文件里布尔值允许多种写法，统一解析后供初始化逻辑使用。
     bool parse_bool_value(const std::string& value, bool default_value) {
         const auto lowered = lower_copy(trim_copy(value));
@@ -1251,7 +1259,7 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         }
     }
 
-    int idx_counter = 0;
+    int idx_counter = box_id_start_for_camera(requested_camera_ip);
     #pragma omp parallel for
     for (int i = 0; i < (int)detected_masks.size(); ++i) {
         const auto &mask = detected_masks[i];
@@ -1284,6 +1292,10 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
 
     int total_results = static_cast<int>(results.size());
     int num_to_write = std::min(total_results, YZX_MAX_BOX);
+    if (total_results > 100) {
+        spdlog::warn("Detected {} boxes for camera {}, box IDs may exceed reserved camera range",
+                     total_results, requested_camera_ip);
+    }
     
     for (int i = 0; i < num_to_write; ++i) {
         const auto &src = results[i];
