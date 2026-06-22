@@ -207,7 +207,15 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
         depth_frame_id != wait_depth_frame_id_ &&
         rgb_frame_id != wait_rgb_frame_id_;
 
-    if (!waiting_frame_ || !is_new_frame) {
+    if (!waiting_frame_) {
+        spdlog::info("[FrameCallback] ip={}, no active waiter, ignore frame depth_frame_id={}, rgb_frame_id={}",
+                     camera_ip_, depth_frame_id, rgb_frame_id);
+        return;
+    }
+
+    if (!is_new_frame) {
+        spdlog::info("[FrameCallback] ip={}, frame id not changed yet, wait depth!={}, rgb!={}, got depth={}, rgb={}",
+                     camera_ip_, wait_depth_frame_id_, wait_rgb_frame_id_, depth_frame_id, rgb_frame_id);
         return;
     }
 
@@ -512,6 +520,8 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
             wait_depth_frame_id_ = last_depth_frame_id_;
             wait_rgb_frame_id_ = last_rgb_frame_id_;
         }
+        spdlog::info("[CapFrame][FrameData] attempt={}, waiting for new frame id, current depth={}, rgb={}",
+                     attempt, wait_depth_frame_id_, wait_rgb_frame_id_);
 
         spdlog::info("[CapFrame][FrameData] attempt={}, elapsed={}ms, call LX_CMD_SOFTWARE_TRIGGER",
                      attempt, elapsed_ms_since(start_time));
@@ -536,9 +546,14 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
         spdlog::info("[CapFrame][FrameData] attempt={}, waiting for frame callback, elapsed={}ms",
                      attempt, elapsed_ms_since(start_time));
         std::unique_lock<std::mutex> lock(frame_mutex_);
-        frame_cv_.wait(lock, [&] {
-            return async_frame_arrived_;
-        });
+        while (!async_frame_arrived_) {
+            frame_cv_.wait_for(lock, std::chrono::seconds(1));
+            if (!async_frame_arrived_) {
+                spdlog::info("[CapFrame][FrameData] attempt={}, still waiting new frame, wait depth!={}, rgb!={}, latest depth={}, rgb={}, elapsed={}ms",
+                             attempt, wait_depth_frame_id_, wait_rgb_frame_id_,
+                             last_depth_frame_id_, last_rgb_frame_id_, elapsed_ms_since(start_time));
+            }
+        }
 
         const LX_STATE frame_state = async_frame_state_;
         const int error_code = async_error_code_;
