@@ -78,10 +78,10 @@ private:
     bool async_has_frame_ = false;
     LX_STATE async_frame_state_ = LX_ERROR;
     int async_error_code_ = -1;
-    unsigned int last_depth_frame_id_ = 0;
-    unsigned int last_rgb_frame_id_ = 0;
-    unsigned int wait_depth_frame_id_ = 0;
-    unsigned int wait_rgb_frame_id_ = 0;
+    int last_depth_frame_id_ = -1;
+    int last_rgb_frame_id_ = -1;
+    int wait_depth_frame_id_ = -1;
+    int wait_rgb_frame_id_ = -1;
     cv::Mat latest_rgb_;
     pcl::PointCloud<pcl::PointXYZ> latest_cloud_;
 };

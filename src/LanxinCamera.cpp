@@ -185,12 +185,12 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
         return;
     }
 
-    unsigned int depth_frame_id = 0;
-    unsigned int rgb_frame_id = 0;
+    int depth_frame_id = -1;
+    int rgb_frame_id = -1;
     if (frame->reserve_data != nullptr) {
         const auto* extend = static_cast<const FrameExtendInfo*>(frame->reserve_data);
-        depth_frame_id = extend->depth_frame_id;
-        rgb_frame_id = extend->rgb_frame_id;
+        depth_frame_id = static_cast<int>(extend->depth_frame_id);
+        rgb_frame_id = static_cast<int>(extend->rgb_frame_id);
         spdlog::info("[FrameCallback] ip={}, frame_state={}, depth_frame_id={}, rgb_frame_id={}",
                      camera_ip_, static_cast<int>(frame->frame_state),
                      depth_frame_id, rgb_frame_id);
@@ -204,8 +204,10 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
     last_rgb_frame_id_ = rgb_frame_id;
 
     const bool is_new_frame =
-        depth_frame_id != wait_depth_frame_id_ &&
-        rgb_frame_id != wait_rgb_frame_id_;
+        wait_depth_frame_id_ < 0 ||
+        wait_rgb_frame_id_ < 0 ||
+        (depth_frame_id != wait_depth_frame_id_ &&
+         rgb_frame_id != wait_rgb_frame_id_);
 
     if (!waiting_frame_) {
         spdlog::info("[FrameCallback] ip={}, no active waiter, ignore frame depth_frame_id={}, rgb_frame_id={}",
