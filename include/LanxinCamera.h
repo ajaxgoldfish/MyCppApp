@@ -1,5 +1,8 @@
 #ifndef LANXINCAMERA_H
 #define LANXINCAMERA_H
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -36,6 +39,9 @@ public:
 
     ~LanxinCamera() {
         if (isConnect) {
+            if (callback_registered_) {
+                DcUnregisterFrameCallback(handle);
+            }
             DcStopStream(handle);
             DcCloseDevice(handle);
         }
@@ -48,6 +54,8 @@ public:
 private:
     // 保存 SDK 句柄和图像参数，后续每次取帧都复用这些连接状态。
     int connect();
+    static void FrameCallback(FrameInfo* frame, void* usrData);
+    void HandleFrame(FrameInfo* frame);
 
     DcHandle handle = 0;
     std::string camera_ip_;
@@ -61,6 +69,21 @@ private:
     int rgb_width = 0;
     cv::Mat param;
     bool isConnect = false;
+    bool callback_registered_ = false;
+
+    std::mutex frame_mutex_;
+    std::condition_variable frame_cv_;
+    bool waiting_frame_ = false;
+    bool async_frame_arrived_ = false;
+    bool async_has_frame_ = false;
+    LX_STATE async_frame_state_ = LX_ERROR;
+    int async_error_code_ = -1;
+    unsigned int last_depth_frame_id_ = 0;
+    unsigned int last_rgb_frame_id_ = 0;
+    unsigned int wait_depth_frame_id_ = 0;
+    unsigned int wait_rgb_frame_id_ = 0;
+    cv::Mat latest_rgb_;
+    pcl::PointCloud<pcl::PointXYZ> latest_cloud_;
 };
 
 
