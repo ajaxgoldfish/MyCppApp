@@ -385,11 +385,11 @@ int bs_yzx_init(const bool is_debug) {
     spdlog::set_level(is_debug ? spdlog::level::debug : spdlog::level::info);
     spdlog::flush_on(spdlog::level::err);
 
-    const LX_STATE sdk_log_state = DcSetInfoOutput(0, false, "", 0);
+    const LX_STATE sdk_log_state = DcSetInfoOutput(1, false, "", 0);
     if (sdk_log_state != LX_SUCCESS) {
-        spdlog::warn("Failed to set LanxinCamera SDK log level to info: {}", DcGetErrorString(sdk_log_state));
+        spdlog::warn("Failed to set LanxinCamera SDK log level: {}", DcGetErrorString(sdk_log_state));
     } else {
-        spdlog::info("LanxinCamera SDK log level set to info");
+        spdlog::info("LanxinCamera SDK log level set to 1");
     }
 
     // 默认值提供可运行的兜底配置，随后由 cnn.ini 覆盖。
