@@ -75,6 +75,8 @@ private:
     std::condition_variable frame_cv_;
     bool waiting_frame_ = false;
     bool async_has_frame_ = false;
+    bool async_has_rgb_ = false;
+    bool async_has_cloud_ = false;
     LX_STATE async_frame_state_ = LX_ERROR;
     int async_error_code_ = -1;
     int last_depth_frame_id_ = -1;

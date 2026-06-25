@@ -199,7 +199,6 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
                  camera_ip_, static_cast<int>(frame->frame_state),
                  depth_frame_id, rgb_frame_id);
 
-    async_has_frame_ = false;
     async_frame_state_ = frame->frame_state;
     async_error_code_ = -1;
 
@@ -259,17 +258,28 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
         }
     }
 
-    if (rgb_ok && pc_ok) {
+    if (rgb_ok) {
         latest_rgb_ = std::move(rgb_copy);
+        async_has_rgb_ = true;
+    }
+    if (pc_ok) {
         latest_cloud_ = std::move(cloud_copy);
+        async_has_cloud_ = true;
+    }
+
+    if (async_has_rgb_ && async_has_cloud_) {
         async_has_frame_ = true;
         async_error_code_ = 0;
         waiting_frame_ = false;
         frame_cv_.notify_one();
     } else {
-        async_error_code_ = rgb_ok ? -2 : -3;
-        spdlog::warn("[FrameCallback] ip={}, incomplete data, rgb_ok={}, pc_ok={}, error_code={}, continue waiting",
-                     camera_ip_, rgb_ok, pc_ok, async_error_code_);
+        if (!async_has_cloud_) {
+            async_error_code_ = -2;
+        } else if (!async_has_rgb_) {
+            async_error_code_ = -3;
+        }
+        spdlog::warn("[FrameCallback] ip={}, partial data, callback rgb_ok={}, pc_ok={}, accumulated rgb_ok={}, pc_ok={}, error_code={}, continue waiting",
+                     camera_ip_, rgb_ok, pc_ok, async_has_rgb_, async_has_cloud_, async_error_code_);
     }
 }
 
@@ -299,6 +309,8 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
         std::lock_guard<std::mutex> lock(frame_mutex_);
         waiting_frame_ = true;
         async_has_frame_ = false;
+        async_has_rgb_ = false;
+        async_has_cloud_ = false;
         async_frame_state_ = LX_ERROR;
         async_error_code_ = -1;
         spdlog::info("[CapFrame][FrameData] waiting callback frame, latest depth={}, rgb={}",
@@ -309,7 +321,8 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
     while (!async_has_frame_) {
         frame_cv_.wait_for(lock, std::chrono::seconds(1));
         if (!async_has_frame_) {
-            spdlog::info("[CapFrame][FrameData] still waiting callback frame, latest depth={}, rgb={}, elapsed={}ms",
+            spdlog::info("[CapFrame][FrameData] still waiting callback frame, accumulated rgb_ok={}, pc_ok={}, latest depth={}, rgb={}, elapsed={}ms",
+                         async_has_rgb_, async_has_cloud_,
                          last_depth_frame_id_, last_rgb_frame_id_, elapsed_ms_since(start_time));
         }
     }
