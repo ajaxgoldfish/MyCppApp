@@ -252,7 +252,7 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
             cloud_copy.width = cloud_copy.points.size();
             cloud_copy.height = 1;
             cloud_copy.is_dense = false;
-            pc_ok = !cloud_copy.empty();
+            pc_ok = true;
             spdlog::info("[FrameCallback] ip={}, converted point cloud, total_pixels={}, valid_points={}",
                          camera_ip_, total, cloud_copy.points.size());
         }
