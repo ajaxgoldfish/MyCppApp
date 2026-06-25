@@ -74,14 +74,11 @@ private:
     std::mutex frame_mutex_;
     std::condition_variable frame_cv_;
     bool waiting_frame_ = false;
-    bool async_frame_arrived_ = false;
     bool async_has_frame_ = false;
     LX_STATE async_frame_state_ = LX_ERROR;
     int async_error_code_ = -1;
     int last_depth_frame_id_ = -1;
     int last_rgb_frame_id_ = -1;
-    int wait_depth_frame_id_ = -1;
-    int wait_rgb_frame_id_ = -1;
     cv::Mat latest_rgb_;
     pcl::PointCloud<pcl::PointXYZ> latest_cloud_;
 };
