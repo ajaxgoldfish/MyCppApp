@@ -240,12 +240,13 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
         if (LX_SUCCESS == xyz_ret && xyz_data != nullptr) {
             const int total = depth_data.frame_width * depth_data.frame_height;
             cloud_copy.points.reserve(total);
+            int nonzero_points = 0;
             for (int i = 0; i < total; ++i) {
                 const float x = xyz_data[i * 3];
                 const float y = xyz_data[i * 3 + 1];
                 const float z = xyz_data[i * 3 + 2];
-                if (x == 0 && y == 0 && z == 0) {
-                    continue;
+                if (x != 0 || y != 0 || z != 0) {
+                    ++nonzero_points;
                 }
                 cloud_copy.points.emplace_back(x / 1000, y / 1000, z / 1000);
             }
@@ -253,8 +254,8 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
             cloud_copy.height = 1;
             cloud_copy.is_dense = false;
             pc_ok = true;
-            spdlog::info("[FrameCallback] ip={}, converted point cloud, total_pixels={}, valid_points={}",
-                         camera_ip_, total, cloud_copy.points.size());
+            spdlog::info("[FrameCallback] ip={}, converted point cloud, total_pixels={}, points={}, nonzero_points={}",
+                         camera_ip_, total, cloud_copy.points.size(), nonzero_points);
         }
     }
 
@@ -316,7 +317,7 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
     rgbMat = latest_rgb_.clone();
     pc = latest_cloud_;
     const LX_STATE frame_state = async_frame_state_;
-    spdlog::info("[CapFrame][FrameData] success ip={}, elapsed={}ms, frame_state={}, rgb={}x{}, valid_points={}",
+    spdlog::info("[CapFrame][FrameData] success ip={}, elapsed={}ms, frame_state={}, rgb={}x{}, points={}",
                  camera_ip_, elapsed_ms_since(start_time), static_cast<int>(frame_state),
                  rgbMat.cols, rgbMat.rows, pc.points.size());
     return 0;
