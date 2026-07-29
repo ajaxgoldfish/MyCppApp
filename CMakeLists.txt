@@ -8,7 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(spdlog CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
-find_package(PCL CONFIG REQUIRED)
+find_package(Eigen3 CONFIG REQUIRED)
 find_package(OpenMP REQUIRED)
 
 # 这里集中维护头文件目录，主 DLL 和测试程序共享同一套依赖路径。
@@ -23,7 +23,7 @@ set(COMMON_INCLUDE_DIRS
 set(COMMON_LIBS
     ${OpenCV_LIBS}
     spdlog::spdlog
-    ${PCL_LIBRARIES}
+    Eigen3::Eigen
     OpenMP::OpenMP_CXX
     ${PROJECT_SOURCE_DIR}/third_party/lanxin/lib/win_x64/LxCameraApi.lib
     ${PROJECT_SOURCE_DIR}/third_party/ffmpeg/ffmpeg-n6.1-latest-win64-lgpl-shared-6.1/lib/avcodec.lib
@@ -52,5 +52,25 @@ target_include_directories(test_gpu_dll PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(test_gpu_dll PRIVATE yzx_vision_zzb_gpu ${COMMON_LIBS})
 
 set_target_properties(test_gpu_dll PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
+# 纯相机 SDK 采集程序：直接保存 RGB BMP 和对齐深度 PGM，只链接蓝芯相机库。
+add_executable(camera_capture
+    src/camera_capture.cpp
+)
+
+target_include_directories(camera_capture PRIVATE
+    ${CMAKE_SOURCE_DIR}/third_party/lanxin/include
+)
+target_link_libraries(camera_capture PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/lanxin/lib/win_x64/LxCameraApi.lib
+)
+
+if(MSVC)
+    target_compile_options(camera_capture PRIVATE /utf-8)
+endif()
+
+set_target_properties(camera_capture PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )

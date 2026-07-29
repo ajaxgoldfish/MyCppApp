@@ -4,13 +4,10 @@
 
 #include "cpu_library.h"
 #include "LanxinCamera.h"
-#include <pcl/point_types.h>
-#include <pcl/point_cloud.h>
-#include <pcl/io/pcd_io.h>
-#include <pcl/segmentation/sac_segmentation.h>
 #include <onnxruntime_cxx_api.h>
 #include <Eigen/Dense>
 #include <array>
+#include <cstdint>
 #include <iomanip>
 #include <cmath>
 #include <limits>
@@ -26,6 +23,7 @@
 #include <spdlog/spdlog.h>
 #include <opencv2/opencv.hpp>
 #include <memory>
+#include <random>
 #include <vector>
 #include <string>
 #include <thread>
@@ -91,12 +89,6 @@ namespace {
     cv::Mat g_mat_k, g_mat_k_inv, g_mat_twc; 
     bool g_is_pipeline_ready = false;
     std::string g_root_output_dir = "res";
-
-    // 点云投影表记录每个 3D 点落到哪个 RGB 像素，后续可快速从 2D mask 找回对应点云。
-    struct ProjectionMap {
-        int u, v;
-        int point_idx;
-    };
 
     // 2D 检测结果保存 mask 提取出的四边形和底边中心，为 3D 射线求交提供关键像素点。
     struct DetectionResult2D {
@@ -840,46 +832,91 @@ int bs_yzx_box_sizeof() {
         return run_rfdetr_inference_and_get_masks(image_rgb);
     }
 
-/**
- * 将相机点云投影到 RGB 图像平面。
- * 生成的像素到点云索引用于后续从 2D 分割区域中快速筛出目标物体的 3D 点。
- */
-static std::vector<ProjectionMap> project_point_cloud_to_image(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& pc, const cv::Size& img_size) 
-{
-    std::vector<ProjectionMap> proj_map;
-    if (g_mat_k.empty() || !pc) return proj_map;
+// 蓝芯深度图的数值单位为毫米，这里统一转换为后续几何计算使用的米。
+static double read_depth_meters(const cv::Mat& depth_image, const int y, const int x) {
+    double depth_mm = 0.0;
+    switch (depth_image.depth()) {
+        case CV_8U:  depth_mm = depth_image.at<std::uint8_t>(y, x); break;
+        case CV_8S:  depth_mm = depth_image.at<std::int8_t>(y, x); break;
+        case CV_16U: depth_mm = depth_image.at<std::uint16_t>(y, x); break;
+        case CV_16S: depth_mm = depth_image.at<std::int16_t>(y, x); break;
+        case CV_32S: depth_mm = depth_image.at<std::int32_t>(y, x); break;
+        case CV_32F: depth_mm = depth_image.at<float>(y, x); break;
+        case CV_64F: depth_mm = depth_image.at<double>(y, x); break;
+        default: return 0.0;
+    }
+    if (!std::isfinite(depth_mm) || depth_mm <= 0.0) return 0.0;
+    return depth_mm / 1000.0;
+}
 
-    const double fx = g_mat_k.at<double>(0, 0), fy = g_mat_k.at<double>(1, 1);
-    const double cx = g_mat_k.at<double>(0, 2), cy = g_mat_k.at<double>(1, 2);
-    
-    proj_map.reserve(pc->points.size());
-    
-    #pragma omp parallel
-    {
-        std::vector<ProjectionMap> local_map;
-        // 每个线程先写入本地缓存，最后合并，减少并行投影时的锁竞争。
-        local_map.reserve(pc->points.size() / 4); 
-        
-        #pragma omp for nowait
-        for (int i = 0; i < (int)pc->points.size(); ++i) {
-            const auto &p = pc->points[i];
-            if (p.z <= 0) continue; 
-            
-            int u = (int)std::round(fx * p.x / p.z + cx);
-            int v = (int)std::round(fy * p.y / p.z + cy);
-            
-            if ((unsigned)u < (unsigned)img_size.width && (unsigned)v < (unsigned)img_size.height) {
-                local_map.push_back({u, v, i});
+// 对 mask 内由深度反投影得到的局部三维点做 RANSAC 平面拟合，
+// 再用最佳内点的 PCA 对法向量做一次精化。
+static bool fit_plane_ransac(const std::vector<Eigen::Vector3d>& points,
+                             Eigen::Vector3d& normal,
+                             double& plane_d) {
+    if (points.size() < 30) return false;
+
+    constexpr int kMaxIterations = 300;
+    constexpr double kDistanceThresholdM = 0.004;
+    std::mt19937 random_engine(static_cast<std::uint32_t>(points.size()));
+    std::uniform_int_distribution<std::size_t> random_index(0, points.size() - 1);
+
+    std::size_t best_inlier_count = 0;
+    Eigen::Vector3d best_normal = Eigen::Vector3d::Zero();
+    double best_d = 0.0;
+
+    for (int iteration = 0; iteration < kMaxIterations; ++iteration) {
+        const std::size_t i0 = random_index(random_engine);
+        std::size_t i1 = random_index(random_engine);
+        std::size_t i2 = random_index(random_engine);
+        if (i0 == i1 || i0 == i2 || i1 == i2) continue;
+
+        Eigen::Vector3d candidate_normal =
+            (points[i1] - points[i0]).cross(points[i2] - points[i0]);
+        const double candidate_norm = candidate_normal.norm();
+        if (candidate_norm < 1e-9) continue;
+        candidate_normal /= candidate_norm;
+        const double candidate_d = -candidate_normal.dot(points[i0]);
+
+        std::size_t inlier_count = 0;
+        for (const auto& point : points) {
+            if (std::abs(candidate_normal.dot(point) + candidate_d) <= kDistanceThresholdM) {
+                ++inlier_count;
             }
         }
-        
-        #pragma omp critical
-        {
-            proj_map.insert(proj_map.end(), local_map.begin(), local_map.end());
+        if (inlier_count > best_inlier_count) {
+            best_inlier_count = inlier_count;
+            best_normal = candidate_normal;
+            best_d = candidate_d;
         }
     }
-    return proj_map;
+
+    if (best_inlier_count < 20) return false;
+
+    Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+    std::size_t refined_inlier_count = 0;
+    for (const auto& point : points) {
+        if (std::abs(best_normal.dot(point) + best_d) <= kDistanceThresholdM) {
+            centroid += point;
+            ++refined_inlier_count;
+        }
+    }
+    if (refined_inlier_count < 20) return false;
+    centroid /= static_cast<double>(refined_inlier_count);
+
+    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+    for (const auto& point : points) {
+        if (std::abs(best_normal.dot(point) + best_d) <= kDistanceThresholdM) {
+            const Eigen::Vector3d centered = point - centroid;
+            covariance += centered * centered.transpose();
+        }
+    }
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+    if (solver.info() != Eigen::Success) return false;
+    normal = solver.eigenvectors().col(0).normalized();
+    plane_d = -normal.dot(centroid);
+    return normal.allFinite() && std::isfinite(plane_d);
 }
 
 /**
@@ -936,30 +973,41 @@ static std::optional<DetectionResult2D> extract_rect_from_mask(const cv::Mat1b& 
 
 /**
  * 对单个分割目标进行 3D 位姿和尺寸解算。
- * 流程是：用 2D 四边形筛选点云，RANSAC 拟合目标平面，再让关键像素射线与平面求交；
+ * 流程是：把 mask 内的对齐深度反投影为局部三维点，RANSAC 拟合目标平面，
+ * 再让关键像素射线与平面求交；
  * 最后把相机坐标结果转换到世界坐标，得到位置、姿态、宽高和旋转矩阵。
  */
 static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     const DetectionResult2D& det_2d,
-    const std::vector<ProjectionMap>& proj_map,
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr& global_pc) 
+    const cv::Mat1b& mask,
+    const cv::Mat& depth_image)
 {
-    // 先用 2D 四边形从投影表中筛出目标点云，为平面拟合提供尽量干净的局部点集。
+    if (mask.empty() || depth_image.empty() ||
+        mask.size() != depth_image.size() ||
+        depth_image.channels() != 1 ||
+        g_mat_k.empty()) {
+        return std::nullopt;
+    }
+
+    // 只把实例 mask 内的有效深度反投影到相机坐标系，避免生成和投影整幅点云。
     std::vector<Eigen::Vector3d> points_in_box;
     points_in_box.reserve(4096);
-    std::vector<cv::Point2f> quad(det_2d.quad_pts.begin(), det_2d.quad_pts.end());
+    const double fx = g_mat_k.at<double>(0, 0);
+    const double fy = g_mat_k.at<double>(1, 1);
+    const double cx = g_mat_k.at<double>(0, 2);
+    const double cy = g_mat_k.at<double>(1, 2);
+    if (std::abs(fx) < 1e-9 || std::abs(fy) < 1e-9) return std::nullopt;
 
-    // 外接矩形用于快速排除明显不在目标区域内的点，降低多边形测试开销。
-    cv::Rect bounding_rect = cv::boundingRect(quad);
-
-    for (const auto& proj : proj_map) {
-        if (proj.u >= bounding_rect.x && proj.u <= bounding_rect.x + bounding_rect.width &&
-            proj.v >= bounding_rect.y && proj.v <= bounding_rect.y + bounding_rect.height) {
-            
-            if (cv::pointPolygonTest(quad, cv::Point2f((float)proj.u, (float)proj.v), false) >= 0) {
-                const auto& pt = global_pc->points[proj.point_idx];
-                points_in_box.emplace_back(pt.x, pt.y, pt.z);
-            }
+    for (int y = 0; y < mask.rows; ++y) {
+        const auto* mask_row = mask.ptr<std::uint8_t>(y);
+        for (int x = 0; x < mask.cols; ++x) {
+            if (mask_row[x] == 0) continue;
+            const double z_m = read_depth_meters(depth_image, y, x);
+            if (z_m <= 0.0) continue;
+            points_in_box.emplace_back(
+                (static_cast<double>(x) - cx) * z_m / fx,
+                (static_cast<double>(y) - cy) * z_m / fy,
+                z_m);
         }
     }
     if (points_in_box.size() < 30) return std::nullopt;
@@ -996,31 +1044,10 @@ static std::optional<LocalBoxPoseResult> solve_pose_for_single_object(
     Eigen::Vector3d ray_2 = get_ray_dir(base_pt_b);
     Eigen::Vector3d ray_3 = get_ray_dir(third_pt);
 
-    // 在目标点云上拟合主平面，过滤离群点后得到可靠的物体表面法向。
-    pcl::PointCloud<pcl::PointXYZ>::Ptr temp_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    temp_cloud->points.reserve(points_in_box.size());
-    for(const auto& pt : points_in_box) {
-        temp_cloud->points.emplace_back(pt.x(), pt.y(), pt.z());
-    }
-    temp_cloud->width = temp_cloud->points.size();
-    temp_cloud->height = 1;
-    temp_cloud->is_dense = false;
-
-    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
-    pcl::SACSegmentation<pcl::PointXYZ> seg;
-    seg.setOptimizeCoefficients(true);
-    seg.setModelType(pcl::SACMODEL_PLANE);
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setDistanceThreshold(0.004);
-    seg.setMaxIterations(300);
-    seg.setInputCloud(temp_cloud);
-    seg.segment(*inliers, *coefficients);
-
-    if (inliers->indices.size() < 20) return std::nullopt;
-
-    Eigen::Vector3d n(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
-    double d = coefficients->values[3];
+    // 在局部深度点上拟合主平面，过滤离群值后得到物体表面法向。
+    Eigen::Vector3d n;
+    double d = 0.0;
+    if (!fit_plane_ransac(points_in_box, n, d)) return std::nullopt;
     double norm_l = n.norm();
     if (norm_l < 1e-9) return std::nullopt;
 
@@ -1197,25 +1224,32 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
     auto time_start = std::chrono::steady_clock::now();
 
     cv::Mat image_rgb;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    cv::Mat depth_image;
     const std::string timestamp = make_timestamp_dir_name();
     fs::path output_dir = fs::path(g_root_output_dir) / timestamp;
 
-    // 创建本次运行的结果目录，并采集一帧 RGB 与一帧点云作为同一批输入数据。
-    // 原始数据会异步保存，便于后续复盘，但不阻塞在线检测流程。
+    // 创建本次运行的结果目录，并采集一帧 RGB 与已对齐深度作为同一批输入数据。
+    // 只异步保存 RGB 原图；深度用于内存中的位姿计算，不再生成 PCD 文件。
     std::error_code ec;
     fs::create_directories(output_dir, ec);
 
-    const int capture_result = camera->CapFrame(image_rgb, *point_cloud);
-    if (capture_result != 0 || image_rgb.empty() || point_cloud->empty()) {
-        if (capture_result == -2 || (capture_result == 0 && point_cloud->empty())) {
-            spdlog::error("Failed to capture point cloud or empty");
+    const int capture_result = camera->CapFrame(image_rgb, depth_image);
+    if (capture_result != 0 || image_rgb.empty() || depth_image.empty()) {
+        if (capture_result == -2 || (capture_result == 0 && depth_image.empty())) {
+            spdlog::error("Failed to capture aligned depth image or empty");
             return -23;
         }
         spdlog::error("Failed to capture RGB frame");
         return -22;
     }
+    if (depth_image.channels() != 1 || depth_image.size() != image_rgb.size()) {
+        spdlog::error("Aligned depth image mismatch: rgb={}x{}, depth={}x{}, depth_channels={}",
+                      image_rgb.cols, image_rgb.rows,
+                      depth_image.cols, depth_image.rows, depth_image.channels());
+        return -23;
+    }
     image_rgb = image_rgb.clone();
+    depth_image = depth_image.clone();
 
     const fs::path rgbPath = output_dir / "rgb_orig.jpg";
     cv::Mat image_rgb_clone = image_rgb.clone();
@@ -1225,27 +1259,18 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
         }
     }).detach();
 
-    const fs::path pcdPath = output_dir / "cloud_orig.pcd";
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_clone(new pcl::PointCloud<pcl::PointXYZ>(*point_cloud));
-    std::thread([pcdPath, cloud_clone]() {
-        pcl::io::savePCDFileASCII(pcdPath.string(), *cloud_clone);
-    }).detach();
-
     // 模型推理负责从 RGB 图中得到实例 mask，后续 3D 步骤都以这些 mask 为目标区域。
     auto t1 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 1: Data Loading took {:.3f} ms", std::chrono::duration<double, std::milli>(t1 - time_start).count());
 
     auto detected_masks = run_inference_and_get_masks(image_rgb);
     
-    // 预先把点云投影到 RGB 像素，后续每个 mask 都可以复用这张映射表。
     auto t2 = std::chrono::steady_clock::now();
     spdlog::info("[Timing] Step 2: Inference took {:.3f} ms", std::chrono::duration<double, std::milli>(t2 - t1).count());
 
-    auto proj_map = project_point_cloud_to_image(point_cloud, image_rgb.size());
-
-    // 将每个 2D mask 转成四边形，再结合点云估计目标在世界坐标中的位姿与尺寸。
+    // 将每个 2D mask 与对齐深度结合，估计目标在世界坐标中的位姿与尺寸。
     auto t3 = std::chrono::steady_clock::now();
-    spdlog::info("[Timing] Step 3: Precompute Projection took {:.3f} ms", std::chrono::duration<double, std::milli>(t3 - t2).count());
+    spdlog::info("[Timing] Step 3: Depth Validation took {:.3f} ms", std::chrono::duration<double, std::milli>(t3 - t2).count());
     std::vector<LocalBoxPoseResult> results;
     cv::Mat vis_image = image_rgb.clone(); 
     
@@ -1271,7 +1296,7 @@ int bs_yzx_object_detection_lanxin(zzb::Box box_array[],
     for (int i = 0; i < (int)detected_masks.size(); ++i) {
         const auto &mask = detected_masks[i];
         if (auto det_2d = extract_rect_from_mask(mask)) {
-            if (auto pose_res = solve_pose_for_single_object(*det_2d, proj_map, point_cloud)) {
+            if (auto pose_res = solve_pose_for_single_object(*det_2d, mask, depth_image)) {
                 #pragma omp critical
                 {
                     pose_res->id = idx_counter++;

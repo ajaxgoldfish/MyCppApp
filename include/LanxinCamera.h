@@ -4,8 +4,6 @@
 #include <cstdint>
 #include <mutex>
 #include <opencv2/opencv.hpp>
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,12 +16,10 @@ public:
     static void SetCaptureRetryTimeoutMs(int timeoutMs);
     static int GetCaptureRetryTimeoutMs();
 
-    // 构造时立即按 IP 建立连接，使调用方只需关注取 RGB 或点云数据。
+    // 构造时立即按 IP 建立连接，使调用方只需关注获取 RGB 与对齐深度。
     explicit LanxinCamera(std::string cameraIp) : camera_ip_(std::move(cameraIp)) {
         connect();
     }
-
-    int CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc);
 
     bool isOpened() const {
         return isConnect;
@@ -35,7 +31,7 @@ public:
 
     int CapFrame(cv::Mat &rgbMat);
 
-    int CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc);
+    int CapFrame(cv::Mat &rgbMat, cv::Mat &depthMat);
 
     ~LanxinCamera() {
         if (isConnect) {
@@ -65,7 +61,6 @@ private:
     int tof_width = 0;
     int tof_height = 0;
     int tof_depth_type = 0;
-    int tof_amp_type = 0;
     int rgb_width = 0;
     cv::Mat param;
     bool isConnect = false;
@@ -76,13 +71,13 @@ private:
     bool waiting_frame_ = false;
     bool async_has_frame_ = false;
     bool async_has_rgb_ = false;
-    bool async_has_cloud_ = false;
+    bool async_has_depth_ = false;
     LX_STATE async_frame_state_ = LX_ERROR;
     int async_error_code_ = -1;
     int last_depth_frame_id_ = -1;
     int last_rgb_frame_id_ = -1;
     cv::Mat latest_rgb_;
-    pcl::PointCloud<pcl::PointXYZ> latest_cloud_;
+    cv::Mat latest_depth_;
 };
 
 

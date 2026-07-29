@@ -26,7 +26,11 @@ LX_API_STR DcGetApiVersion();
 /**
  * @brief Set the level of log
  * 
- * @param print_level [in]print_level 0: info All debug messages 1: warn Important and warning debug messages 2: error Only error messages are output.
+ * @param print_level [in]print_level
+ 0: info All debug messages 
+ 1: warn Important and warning debug messages 
+ 2: error Only error messages are output.
+ 3: no output
  * @param enable_screen_print [in]Whether to print in the window
  * @param log_path [in]Log file save path
  * @return LX_API 
@@ -63,10 +67,10 @@ LX_API DcLog(const char* str);
  * @return LX_API 
  */
 #ifdef __cplusplus
-LX_EXPORT LX_STATE LX_STDC DcGetDeviceList(LxDeviceInfo** devlist, int* devnum, LX_DEVICE_SERIALS lx_serials = LX_SERIAL_ALL);
+LX_API DcGetDeviceList(LxDeviceInfo** devlist, int* devnum, LX_DEVICE_SERIALS lx_serials = LX_SERIAL_ALL);
 #else
 //纯C风格接口，原接口逐步弃用
-LX_API DcGetDeviceList(LxDeviceInfo** devlist, int* devnum);
+LX_API DcGetDeviceList(LxDeviceInfo** devlist, int* devnum, LX_DEVICE_SERIALS lx_serials);
 #endif
 
 //~chinese:
@@ -86,6 +90,26 @@ LX_API DcGetDeviceList(LxDeviceInfo** devlist, int* devnum);
  * @return LX_API 
  */
 LX_API DcOpenDevice(LX_OPEN_MODE open_mode, const char* param, DcHandle* handle, LxDeviceInfo* info);
+
+//~chinese:
+//功能：打开设备。设备打开后会独占权限，其他进程无法再打开相机。如果程序强制结束没有调用DcCloseDevice，需要等待几秒等心跳超时释放权限, 使用指定网卡IP进行绑定
+//参数：[in]open_mode           打开方式, 具体说明见LX_OPEN_MODE
+//      [in]param               不同的打开方式，填写不同的参数(当sdk运行在相机内部时，此处填写"127.0.0.1")
+//      [in]eth_ip              指定网卡IP, 必须指定, 用于gvsp,imu数据指定网卡接收数据
+//      [out]handle             连接成功后返回的设备句柄,后续所有接口访问都依赖该handle字段
+//      [out]info               连接成功后返回的相机详细信息
+//~english:
+/**
+ * @brief open device  
+ * 
+ * @param open_mode[in]Open mode, see LX_OPEN_MODE for details. 
+ * @param param[in]Fill in different parameters for different opening methods (when the sdk is running inside the camera, fill in "127.0.0.1" here) 
+ * @param eth_ip[in] ethernet ip, use fixed  ethernet to opendevice for gvsp, imu data transmission;
+ * @param handle[out]The handle of the device returned after a successful connection, all subsequent interface accesses rely on this handle field. 
+ * @param info[out]Camera details returned after successful connection 
+ * @return LX_API 
+ */
+LX_API DcOpenDeviceFixedEth(LX_OPEN_MODE open_mode, const char* param, const char* eth_ip, DcHandle* handle, LxDeviceInfo* info);
 
 //~chinese
 //功能: 关闭设备。与DcOpenDevice对应，释放权限和资源。
@@ -308,7 +332,9 @@ LX_API DcSetCmd(DcHandle handle, int cmd);
 //~chinese
 //功能：LX_CAMERA_FEATURE定义之外的特殊操作，具体功能和参数由字符串command确定
 //参数：[in]handle                 设备句柄
-//      [in]command                指令
+//      [in]command                指令(具体详见demo)
+//                                 SetObstacleIndex,GetObstacleIndex,SetObstacleMode,GetObstacleIO,SetOdomData,SetRelocPose,SetLaserData,ImportLocationMapFile,EnableBuildMap,EnableLocation,ExportLocationMapFile
+// 
 //      [in][out]value             设置时为对应入参，获取时为对应出参，无需外部分配内存
 //~english
 /**
@@ -321,6 +347,25 @@ LX_API DcSetCmd(DcHandle handle, int cmd);
  */
 LX_API DcSpecialControl(DcHandle handle, const char* command, void* value);
 
+//~chinese
+//功能：LX_CAMERA_FEATURE定义之外的特殊操作，具体功能和参数由字符串command确定
+//参数：[in]handle                 设备句柄
+//      [in]command                指令(具体详见demo)
+//                                 SetObstacleIndex,GetObstacleIndex,SetObstacleMode,GetObstacleIO,SetOdomData,SetRelocPose,SetLaserData,ImportLocationMapFile,EnableBuildMap,EnableLocation,ExportLocationMapFile
+// 
+//      [in][out]value             设置时为对应入参，获取时为对应出参，无需外部分配内存
+//      [in]timeout_ms             超时时间
+//~english
+/**
+ * @brief Special operations outside the definition of LX_CAMERA_FEATURE, with specific functions and parameters defined by the string command
+ * 
+ * @param handle[in]Device handle  
+ * @param command[in]Command      
+ * @param value[in][out]Input parameter when setting, output parameter when getting, no need to allocate memory externally. 
+ * @param timeout_ms[in] Control timeout_ms, ms. if timeout_ms<=300 then call once else try call timeout_ms/300 times before timeout, if timeout_ms <1 then timeout_ms=LX_INT_GVCP_TIME_OUT default 1800ms
+ * @return LX_API 
+ */
+LX_API DcSpecialControlExtend(DcHandle handle, const char* command, void* value, int timeout_ms);
 
 //~chinese
 //功能：设置ROI区域, 输入数值若不是8的整数倍,内部会自动处理为目标值最近的8的整倍数
@@ -448,12 +493,12 @@ LX_API DcWriteUserData(DcHandle handle, int start_address, char* data, int data_
 LX_API DcReadUserData(DcHandle handle, int start_address, char** data, int& data_size);
 
 //~chinese
-//功能: 保存点云，可直接调用
+//功能: 保存点云，可直接调用。需要在采集数据线程中调用否则数据会有异常
 //参数：[in]handle                设备句柄
 //      [in]filename              文件名，支持txt,ply和pcd格式。txt格式按图像顺序保存所有数据，ply和pcd仅保存非零数据
 //~english
 /**
- * @brief Save the point cloud, which can be called directly
+ * @brief Save the point cloud, which can be called directly.It needs to be called in the data collection thread, otherwise the data will have exceptions.
  * 
  * @param handle[in]Device handle  
  * @param filename[in]File name, supports txt, ply and pcd formats. txt format saves all data in image order, ply and pcd only save non-zero data 
@@ -500,5 +545,81 @@ LX_API_STR DcGetErrorString(LX_STATE state);
  */
 LX_API DcSetGpuEnable(bool is_enable);
 LX_API DcGetGpuEnable(bool* is_enable);
+
+//~chinese:
+//功能: 开启ptp时间同步源服务，打开相机前调用，否则无效。默认打开
+//参数：[in]is_enable     是否使能
+//~english:
+/**
+ * @brief Enable the PTP time synchronization source service and call it before turning on the camera, otherwise it will be invalid. It is turned on by default
+
+ *
+ * @param is_enable [bool]
+ * @return LX_API
+ */
+LX_API DcSetPtpEnable(bool is_enable);
+LX_API DcGetPtpEnable(bool* is_enable);
+
+
+/**
+ * 功能：多线程并行计算加速线程数量
+ * 参数：{int} thread_num: 设置并行计算的线程数，默认-1自动调整
+ * 开启并行计算会增加CPU消耗，但是计算速度有较大提升
+ */
+//~english:
+/**
+ * @brief Multi-threaded parallel computing accelerates the number of threads
+ *
+ * @param {int} thread_num: Set the number of threads to be computed in parallel, and the default -1 will automatically adjust
+ *        Enabling parallel computing will increase CPU consumption, but the computing speed will be greatly improved
+ * @return LX_API
+ */
+LX_API DcSetParallelThread(int thread_num);
+
+/**
+ * 功能：2d图像传输采用jpeg压缩，设置jpeg解码方式，
+ * 参数：{int} mode: 参考JPEG_DECODE_METHOD
+ */
+LX_API DcSetJpegDecodeMethod(int mode);
+
+/**
+ * 功能：设置日志文件滚动存储最大数量
+ */
+LX_API DcSetMaxLogFile(int count);
+LX_API DcGetMaxLogFile(int* count);
+/**
+ * 功能：设置单个日志文件最大容量，单位byte
+ */
+LX_API DcSetMaxLogFileSize(int size);
+LX_API DcGetMaxLogFileSize(int* size);
+
+
+//~chinese
+//功能: 注册IMU传感器数据回调函数,收到新的数据时自动调用
+//参数：[in]handle      设备句柄
+//      [in]func        回调函数指针
+//      [in]usr_data    用户自定义参数
+//~english
+/**
+ * @brief Register the imu data callback function to be called automatically when new data is received.
+ *
+ * @param handle[in]Device handle
+ * @param func[in]Callback function pointer
+ * @param usr_data[in]User-defined parameters
+ * @return LX_API
+ */
+LX_API DcRegisterImuDataCallback(DcHandle handle, LX_IMUDATA_CALLBACK func, void* usr_data);
+
+//~chinese
+//功能: 取消IMU传感器数据帧注册回调函数
+//参数：[in]handle      设备句柄
+//~english
+/**
+    * @brief Cancel imu data  registration callback function
+    *
+    * @param handle[in]Device handle
+    * @return LX_API
+    */
+LX_API DcUnregisterImuDataCallback(DcHandle handle);
 
 #endif

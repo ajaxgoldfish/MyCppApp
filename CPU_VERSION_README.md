@@ -10,7 +10,6 @@
 ```text
 res/<timestamp>/
   rgb_orig.jpg
-  cloud_orig.pcd
   vis_on_orig.jpg
 ```
 
@@ -31,7 +30,7 @@ Common error codes:
 - `-13`: empty camera IP
 - `-14`: empty intrinsic/extrinsic path
 - `-22`: failed to read or capture RGB image
-- `-23`: failed to read or capture point cloud
+- `-23`: failed to read or capture aligned depth image
 - `-25`: failed to open calibration config
 - `-26`: invalid intrinsic config
 - `-28`: missing extrinsic config

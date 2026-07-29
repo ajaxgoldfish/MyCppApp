@@ -1,4 +1,5 @@
 #include "LanxinCamera.h"
+#include <algorithm>
 #include <chrono>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
@@ -95,16 +96,18 @@ int LanxinCamera::connect() {
                      device_info.name, device_info.algor_ver);
 
         // 只开启本算法需要的深度流和 RGB 流，减少无关数据传输。
-        bool test_depth = true, test_amp = true, test_rgb = true;
+        bool test_depth = true, test_amp = false, test_rgb = true;
         checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_3D_DEPTH_STREAM, test_depth));
+        checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_3D_AMP_STREAM, test_amp));
         checkTC(DcSetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, test_rgb));
 
-        // 幅值流当前不参与检测，保留状态变量便于后续需要时恢复调试。
+        // 显式关闭算法未使用的强度流，只保留深度和 RGB。
         checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_3D_DEPTH_STREAM, &test_depth));
+        checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_3D_AMP_STREAM, &test_amp));
         checkTC(DcGetBoolValue(handle, LX_BOOL_ENABLE_2D_STREAM, &test_rgb));
         spdlog::info("test_depth:{} test_amp:{} test_rgb:{}", test_depth, test_amp, test_rgb);
 
-        // 打开深度到 RGB 坐标的对齐，使 RGB mask 能和点云建立空间对应关系。
+        // 打开深度到 RGB 坐标的对齐，使 RGB mask 与深度像素直接对应。
         checkTC(DcSetIntValue(handle, LX_INT_RGBD_ALIGN_MODE, DEPTH_TO_RGB));
         LxIntValueInfo align_mode;
         checkTC(DcGetIntValue(handle, LX_INT_RGBD_ALIGN_MODE, &align_mode));
@@ -114,7 +117,7 @@ int LanxinCamera::connect() {
         checkTC(DcSetIntValue(handle, LX_INT_TRIGGER_MODE, LX_TRIGGER_MODE_OFF));
         spdlog::info("Stream trigger mode configured: LX_TRIGGER_MODE_OFF");
 
-        // 读取图像参数后，CapFrame 可以按正确尺寸和格式构造 OpenCV/PCL 数据。
+        // 读取图像参数后，CapFrame 可以按正确尺寸和格式构造 RGB 与深度矩阵。
         LxIntValueInfo int_value;
         checkTC(DcGetIntValue(handle, LX_INT_3D_IMAGE_WIDTH, &int_value));
         this->tof_width = int_value.cur_value;
@@ -122,8 +125,6 @@ int LanxinCamera::connect() {
         this->tof_height = int_value.cur_value;
         checkTC(DcGetIntValue(handle, LX_INT_3D_DEPTH_DATA_TYPE, &int_value));
         this->tof_depth_type = int_value.cur_value;
-        checkTC(DcGetIntValue(handle, LX_INT_3D_AMPLITUDE_DATA_TYPE, &int_value));
-        this->tof_amp_type = int_value.cur_value;
         checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_WIDTH, &int_value));
         this->rgb_width = int_value.cur_value;
         checkTC(DcGetIntValue(handle, LX_INT_2D_IMAGE_HEIGHT, &int_value));
@@ -137,7 +138,7 @@ int LanxinCamera::connect() {
         callback_registered_ = true;
         spdlog::info("DcRegisterFrameCallback 完成");
 
-        // 数据流启动后即可连续获取 RGB 图像和 XYZ 点云。
+        // 数据流启动后即可连续获取 RGB 图像和对齐深度图。
         checkTC(DcStartStream(handle));
         stream_started = true;
         spdlog::info("DcStartStream 完成");
@@ -225,36 +226,22 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
         }
     }
 
-    bool pc_ok = false;
-    pcl::PointCloud<pcl::PointXYZ> cloud_copy;
+    bool depth_ok = false;
+    cv::Mat depth_copy;
     const auto& depth_data = frame->depth_data;
     if (depth_data.frame_data != nullptr &&
         depth_data.frame_width > 0 &&
         depth_data.frame_height > 0) {
-        float* xyz_data = nullptr;
-        const auto xyz_ret = DcGetPtrValue(frame->handle, LX_PTR_XYZ_DATA, reinterpret_cast<void**>(&xyz_data));
-        spdlog::info("[FrameCallback] ip={}, DcGetPtrValue(LX_PTR_XYZ_DATA) ret={}, error={}, ptr={}",
-                     camera_ip_, static_cast<int>(xyz_ret), DcGetErrorString(xyz_ret),
-                     static_cast<const void*>(xyz_data));
-        if (LX_SUCCESS == xyz_ret && xyz_data != nullptr) {
-            const int total = depth_data.frame_width * depth_data.frame_height;
-            cloud_copy.points.reserve(total);
-            int nonzero_points = 0;
-            for (int i = 0; i < total; ++i) {
-                const float x = xyz_data[i * 3];
-                const float y = xyz_data[i * 3 + 1];
-                const float z = xyz_data[i * 3 + 2];
-                if (x != 0 || y != 0 || z != 0) {
-                    ++nonzero_points;
-                }
-                cloud_copy.points.emplace_back(x / 1000, y / 1000, z / 1000);
+        const int depth_channels = std::max(depth_data.frame_channel, 1);
+        const int depth_type = static_cast<int>(depth_data.frame_data_type);
+        if (depth_channels == 1 && depth_type >= CV_8U && depth_type <= CV_64F) {
+            cv::Mat depth_view(depth_data.frame_height, depth_data.frame_width,
+                               CV_MAKETYPE(depth_type, depth_channels),
+                               depth_data.frame_data);
+            if (!depth_view.empty()) {
+                depth_copy = depth_view.clone();
+                depth_ok = !depth_copy.empty();
             }
-            cloud_copy.width = cloud_copy.points.size();
-            cloud_copy.height = 1;
-            cloud_copy.is_dense = false;
-            pc_ok = true;
-            spdlog::info("[FrameCallback] ip={}, converted point cloud, total_pixels={}, points={}, nonzero_points={}",
-                         camera_ip_, total, cloud_copy.points.size(), nonzero_points);
         }
     }
 
@@ -262,38 +249,33 @@ void LanxinCamera::HandleFrame(FrameInfo* frame) {
         latest_rgb_ = std::move(rgb_copy);
         async_has_rgb_ = true;
     }
-    if (pc_ok) {
-        latest_cloud_ = std::move(cloud_copy);
-        async_has_cloud_ = true;
+    if (depth_ok) {
+        latest_depth_ = std::move(depth_copy);
+        async_has_depth_ = true;
     }
 
-    if (async_has_rgb_ && async_has_cloud_) {
+    if (async_has_rgb_ && async_has_depth_) {
         async_has_frame_ = true;
         async_error_code_ = 0;
         waiting_frame_ = false;
         frame_cv_.notify_one();
     } else {
-        if (!async_has_cloud_) {
+        if (!async_has_depth_) {
             async_error_code_ = -2;
         } else if (!async_has_rgb_) {
             async_error_code_ = -3;
         }
-        spdlog::warn("[FrameCallback] ip={}, partial data, callback rgb_ok={}, pc_ok={}, accumulated rgb_ok={}, pc_ok={}, error_code={}, continue waiting",
-                     camera_ip_, rgb_ok, pc_ok, async_has_rgb_, async_has_cloud_, async_error_code_);
+        spdlog::warn("[FrameCallback] ip={}, partial data, callback rgb_ok={}, depth_ok={}, accumulated rgb_ok={}, depth_ok={}, error_code={}, continue waiting",
+                     camera_ip_, rgb_ok, depth_ok, async_has_rgb_, async_has_depth_, async_error_code_);
     }
 }
 
-int LanxinCamera::CapFrame(pcl::PointCloud<pcl::PointXYZ> &pc) {
-    cv::Mat rgb;
-    return CapFrame(rgb, pc);
-}
-
 int LanxinCamera::CapFrame(cv::Mat &rgbMat) {
-    pcl::PointCloud<pcl::PointXYZ> pc;
-    return CapFrame(rgbMat, pc);
+    cv::Mat depth;
+    return CapFrame(rgbMat, depth);
 }
 
-int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) {
+int LanxinCamera::CapFrame(cv::Mat &rgbMat, cv::Mat &depthMat) {
     spdlog::info("[CapFrame][FrameData] start ip={}, connected={}, handle={}",
                  camera_ip_, isConnect, handle);
     if (!isConnect) {
@@ -310,7 +292,7 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
         waiting_frame_ = true;
         async_has_frame_ = false;
         async_has_rgb_ = false;
-        async_has_cloud_ = false;
+        async_has_depth_ = false;
         async_frame_state_ = LX_ERROR;
         async_error_code_ = -1;
         spdlog::info("[CapFrame][FrameData] waiting callback frame, latest depth={}, rgb={}",
@@ -321,17 +303,26 @@ int LanxinCamera::CapFrame(cv::Mat &rgbMat, pcl::PointCloud<pcl::PointXYZ> &pc) 
     while (!async_has_frame_) {
         frame_cv_.wait_for(lock, std::chrono::seconds(1));
         if (!async_has_frame_) {
-            spdlog::info("[CapFrame][FrameData] still waiting callback frame, accumulated rgb_ok={}, pc_ok={}, latest depth={}, rgb={}, elapsed={}ms",
-                         async_has_rgb_, async_has_cloud_,
-                         last_depth_frame_id_, last_rgb_frame_id_, elapsed_ms_since(start_time));
+            const long long elapsed_ms = elapsed_ms_since(start_time);
+            spdlog::info("[CapFrame][FrameData] still waiting callback frame, accumulated rgb_ok={}, depth_ok={}, latest depth={}, rgb={}, elapsed={}ms",
+                         async_has_rgb_, async_has_depth_,
+                         last_depth_frame_id_, last_rgb_frame_id_, elapsed_ms);
+            if (elapsed_ms >= g_capture_retry_timeout_ms) {
+                waiting_frame_ = false;
+                const int error_code = !async_has_depth_ ? -2 : -3;
+                spdlog::error("[CapFrame][FrameData] timeout ip={}, rgb_ok={}, depth_ok={}, elapsed={}ms, error_code={}",
+                              camera_ip_, async_has_rgb_, async_has_depth_,
+                              elapsed_ms, error_code);
+                return error_code;
+            }
         }
     }
 
     rgbMat = latest_rgb_.clone();
-    pc = latest_cloud_;
+    depthMat = latest_depth_.clone();
     const LX_STATE frame_state = async_frame_state_;
-    spdlog::info("[CapFrame][FrameData] success ip={}, elapsed={}ms, frame_state={}, rgb={}x{}, points={}",
+    spdlog::info("[CapFrame][FrameData] success ip={}, elapsed={}ms, frame_state={}, rgb={}x{}, depth={}x{}, depth_type={}",
                  camera_ip_, elapsed_ms_since(start_time), static_cast<int>(frame_state),
-                 rgbMat.cols, rgbMat.rows, pc.points.size());
+                 rgbMat.cols, rgbMat.rows, depthMat.cols, depthMat.rows, depthMat.type());
     return 0;
 }
